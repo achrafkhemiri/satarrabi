@@ -5,21 +5,21 @@
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'jsm/loaders/GLTFLoader.js';
+import { RGBELoader } from 'jsm/loaders/RGBELoader.js';
 
 let scene, camera, renderer;
 let earringLeft, earringRight;
 let config = null;
-let baseScale = 0.08; // Base scale for earrings
 
 // Position offsets for ear lobes (tweak these for perfect placement)
 const OFFSETS = {
-  LEFT: { x: -0.008, y: 0.01 },   // Towards ear, slightly down
-  RIGHT: { x: 0.008, y: 0.01 }    // Towards ear, slightly down
+  LEFT: { x: -0.012, y: -0.015 },   // Screen right (user's left)
+  RIGHT: { x: 0.012, y: -0.015 }    // Screen left (user's right)
 };
 
 // Smoothing for positions
 class Smoother {
-  constructor(alpha = 0.5) {
+  constructor(alpha = 0.4) {
     this.alpha = alpha;
     this.prev = null;
   }
@@ -40,8 +40,8 @@ class Smoother {
   }
 }
 
-const smoothLeft = new Smoother(0.5);
-const smoothRight = new Smoother(0.5);
+const smoothLeft = new Smoother(0.6);
+const smoothRight = new Smoother(0.6);
 
 export function initEarringTryOn(options) {
   config = options;
@@ -68,21 +68,28 @@ export function initEarringTryOn(options) {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.2;
   
-  // Lighting - bright and clear
-  const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
+  // Lighting
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
   scene.add(ambientLight);
   
-  const frontLight = new THREE.DirectionalLight(0xffffff, 1.5);
-  frontLight.position.set(0, 0, 5);
-  scene.add(frontLight);
+  const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+  directionalLight.position.set(0, 1, 2);
+  scene.add(directionalLight);
   
-  const topLight = new THREE.DirectionalLight(0xffffff, 0.8);
-  topLight.position.set(0, 5, 2);
-  scene.add(topLight);
-  
-  const backLight = new THREE.DirectionalLight(0xffffff, 0.4);
-  backLight.position.set(0, -1, -3);
+  const backLight = new THREE.DirectionalLight(0xffffff, 0.5);
+  backLight.position.set(0, -1, -2);
   scene.add(backLight);
+  
+  // Load HDR environment (optional, fallback to simple lighting)
+  new RGBELoader().setPath('https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/equirectangular/')
+    .load('venice_sunset_1k.hdr', 
+      (hdrTexture) => {
+        hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+        scene.environment = hdrTexture;
+      },
+      undefined,
+      () => console.log('HDR not loaded, using basic lighting')
+    );
   
   // Load 3D earring model
   const loader = new GLTFLoader();
@@ -94,12 +101,12 @@ export function initEarringTryOn(options) {
       const box = new THREE.Box3().setFromObject(model);
       const size = box.getSize(new THREE.Vector3());
       const maxDim = Math.max(size.x, size.y, size.z);
-      const normScale = 1.0 / maxDim;
-      model.scale.set(normScale, normScale, normScale);
+      const scale = 0.15 / maxDim;
+      model.scale.set(scale, scale, scale);
       
       // Center
       const center = box.getCenter(new THREE.Vector3());
-      model.position.sub(center.multiplyScalar(normScale));
+      model.position.sub(center.multiplyScalar(scale));
       
       // Create left earring
       earringLeft = model.clone();
@@ -108,10 +115,11 @@ export function initEarringTryOn(options) {
       
       // Create right earring (mirrored)
       earringRight = model.clone();
+      earringRight.scale.x *= -1; // Mirror
       earringRight.visible = false;
       scene.add(earringRight);
       
-      console.log('✓ 3D earring model loaded');
+      console.log('3D earring model loaded');
     },
     undefined,
     (err) => console.error('Failed to load 3D model:', err)
@@ -127,21 +135,15 @@ export function initEarringTryOn(options) {
     canvas.width = w * dpr;
     canvas.height = h * dpr;
     
-    const newAspect = w / h;
-    camera.left = -newAspect;
-    camera.right = newAspect;
+    const aspect = w / h;
+    camera.left = -aspect;
+    camera.right = aspect;
     camera.updateProjectionMatrix();
   });
 }
 
 export function updateEarringTryOn(data) {
-  if (!renderer) return;
-  
-  // Always render even if no earrings
-  if (!earringLeft || !earringRight || !data.earLobes) {
-    renderer.render(scene, camera);
-    return;
-  }
+  if (!earringLeft || !earringRight || !data.earLobes) return;
   
   const showEarrings = config?.showEarrings?.() ?? true;
   if (!showEarrings) {
@@ -183,13 +185,15 @@ export function updateEarringTryOn(data) {
   };
   
   // Position earrings
+  // Left ear (user's left = screen right when mirrored)
   const lx = toThreeX(smoothedLeft.x, mirrorPreview);
   const ly = toThreeY(smoothedLeft.y);
-  earringLeft.position.set(lx, ly, 0);
+  earringLeft.position.set(lx, ly, smoothedLeft.z * 2);
   
+  // Right ear (user's right = screen left when mirrored)
   const rx = toThreeX(smoothedRight.x, mirrorPreview);
   const ry = toThreeY(smoothedRight.y);
-  earringRight.position.set(rx, ry, 0);
+  earringRight.position.set(rx, ry, smoothedRight.z * 2);
   
   // Apply rotation from OpenCV pose
   if (rot9 && rot9.length === 9) {
@@ -202,23 +206,24 @@ export function updateEarringTryOn(data) {
     
     const euler = new THREE.Euler().setFromRotationMatrix(rotMat, 'XYZ');
     
-    // Apply rotation with dampening
+    // Apply rotation with some dampening
     earringLeft.rotation.x = euler.x * 0.3;
-    earringLeft.rotation.y = euler.y * 0.4;
-    earringLeft.rotation.z = euler.z * 0.4;
+    earringLeft.rotation.y = euler.y * 0.5;
+    earringLeft.rotation.z = euler.z * 0.5;
     
     earringRight.rotation.x = euler.x * 0.3;
-    earringRight.rotation.y = -euler.y * 0.4;
-    earringRight.rotation.z = -euler.z * 0.4;
+    earringRight.rotation.y = -euler.y * 0.5; // Mirror Y rotation
+    earringRight.rotation.z = -euler.z * 0.5; // Mirror Z rotation
   }
   
-  // Scale based on distance (bigger when closer)
+  // Scale based on distance
   const dist = data.tvec?.z || 500;
-  const distScale = Math.max(0.6, Math.min(1.5, 450 / Math.abs(dist)));
-  const finalScale = baseScale * distScale;
+  const scaleFactor = Math.max(0.5, Math.min(2, 500 / Math.abs(dist)));
+  const baseScale = earringLeft.scale.x;
   
-  earringLeft.scale.set(finalScale, finalScale, finalScale);
-  earringRight.scale.set(-finalScale, finalScale, finalScale); // Mirror X
+  earringLeft.scale.setScalar(baseScale * scaleFactor);
+  earringRight.scale.setScalar(baseScale * scaleFactor);
+  earringRight.scale.x *= -1; // Keep mirror
   
   // Make visible
   earringLeft.visible = true;

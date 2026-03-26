@@ -30,47 +30,35 @@
   </script>
 
   <style>
-    html, body { margin:0; height:100%; overflow:hidden; background:#0a0a0a; font-family: system-ui, sans-serif; }
+    html, body { margin:0; height:100%; overflow:hidden; background:#1a1a2e; font-family: system-ui, sans-serif; }
     #stack { position:relative; width:100vw; height:100vh; }
-    #canvas {
+    #canvas, #three-canvas {
       position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;
-    }
-    #three-canvas {
-      position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;
-      z-index: 10;
     }
     #video { position:absolute; inset:0; width:0; height:0; opacity:0; }
 
     #info {
-      position:absolute; top:10px; left:10px; z-index:20;
-      background:rgba(0,0,0,.85); color:#0f0; padding:14px 18px; border-radius:12px;
-      font:12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      min-width:220px; white-space:pre; border: 1px solid #0f04;
-      backdrop-filter: blur(10px);
+      position:absolute; top:10px; left:10px; z-index:5;
+      background:rgba(0,0,0,.7); color:#0f0; padding:12px; border-radius:8px;
+      font:13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      min-width:260px; white-space:pre; border: 1px solid #0f03;
     }
     
     #controls {
-      position:absolute; top:10px; right:10px; z-index:20;
-      background:rgba(0,0,0,.85); color:#fff; padding:14px 18px; border-radius:12px;
-      font:13px system-ui; border: 1px solid #fff2;
-      backdrop-filter: blur(10px);
+      position:absolute; top:10px; right:10px; z-index:5;
+      background:rgba(0,0,0,.7); color:#fff; padding:12px; border-radius:8px;
+      font:14px system-ui; border: 1px solid #fff3;
     }
-    #controls label { display:flex; align-items:center; margin:8px 0; cursor:pointer; user-select:none; }
-    #controls input[type="checkbox"] { 
-      margin-right: 10px; width:18px; height:18px; 
-      accent-color: #e84393;
-    }
+    #controls label { display:block; margin:6px 0; cursor:pointer; user-select:none; }
+    #controls input[type="checkbox"] { margin-right: 8px; }
 
     #capture-btn {
-      position:absolute; bottom:30px; left:50%; transform:translateX(-50%);
-      z-index:20; padding:14px 40px; background: linear-gradient(135deg, #e84393, #a855f7);
-      color:#fff; border:none; border-radius:30px; font-size:16px; font-weight:600;
-      cursor:pointer; transition: all 0.3s; box-shadow: 0 4px 20px rgba(232,67,147,0.4);
+      position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
+      z-index:5; padding:12px 30px; background:#e84393; color:#fff;
+      border:none; border-radius:25px; font-size:16px; cursor:pointer;
+      transition: all 0.3s;
     }
-    #capture-btn:hover { 
-      transform:translateX(-50%) scale(1.05); 
-      box-shadow: 0 6px 30px rgba(232,67,147,0.6);
-    }
+    #capture-btn:hover { background:#fd79a8; transform:translateX(-50%) scale(1.05); }
 
     .landmark-label { font-size: 10px; }
   </style>
@@ -85,7 +73,8 @@
     
     <div id="controls">
       <label><input id="mirrorPreview" type="checkbox"> Mirror preview</label>
-      <label><input id="showEarLandmarks" type="checkbox"> Show ear points</label>
+      <label><input id="showAllLandmarks" type="checkbox"> Show all 468 points</label>
+      <label><input id="showEarLandmarks" type="checkbox" checked> Show ear landmarks</label>
       <label><input id="showEarrings" type="checkbox" checked> Show earrings</label>
     </div>
 
@@ -181,8 +170,6 @@
     }
 
     function drawEarLandmarks(ctx, lm, cover) {
-      if (!chkEarLandmarks.checked) return;
-      
       const map = (p) => {
         const x = cover.dx + p.x * cover.drawW;
         const y = cover.dy + p.y * cover.drawH;
@@ -191,23 +178,127 @@
 
       ctx.save();
 
-      // Only draw main lobe points (CYAN)
-      ctx.fillStyle = '#00ffff';
-      ctx.font = `bold ${11 * dpr}px monospace`;
-      
-      const lobePoints = [
-        { idx: EAR_LANDMARKS.LEFT_EAR_LOBE_A, label: '#132' },
-        { idx: EAR_LANDMARKS.RIGHT_EAR_LOBE_A, label: '#361' },
-      ];
-      
-      for (const pt of lobePoints) {
-        const p = lm[pt.idx];
-        if (!p) continue;
-        const q = map(p);
-        ctx.beginPath();
-        ctx.arc(q.x, q.y, 5 * dpr, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillText(pt.label, q.x + 8 * dpr, q.y + 4 * dpr);
+      // Draw ALL 468 landmarks if enabled
+      if (chkAllLandmarks.checked) {
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
+        for (let i = 0; i < lm.length; i++) {
+          const p = lm[i];
+          if (!p) continue;
+          const q = map(p);
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, 1.5 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // Draw ear landmarks if enabled
+      if (chkEarLandmarks.checked) {
+        // Define colors for each type
+        const colors = {
+          lobe: '#00ffff',      // Cyan - main lobe points
+          ear: '#00ff00',       // Green - ear area
+          temple: '#ffff00',    // Yellow - temple
+          reference: '#ff0000', // Red - face reference
+        };
+
+        // Draw main ear lobe candidates (CYAN - most important)
+        ctx.fillStyle = colors.lobe;
+        ctx.font = `bold ${11 * dpr}px monospace`;
+        const lobePoints = [
+          { idx: EAR_LANDMARKS.LEFT_EAR_LOBE_A, label: '#132 L' },
+          { idx: EAR_LANDMARKS.LEFT_EAR_LOBE_B, label: '#172 L' },
+          { idx: EAR_LANDMARKS.RIGHT_EAR_LOBE_A, label: '#361 R' },
+          { idx: EAR_LANDMARKS.RIGHT_EAR_LOBE_B, label: '#397 R' },
+        ];
+        for (const pt of lobePoints) {
+          const p = lm[pt.idx];
+          if (!p) continue;
+          const q = map(p);
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, 6 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillText(pt.label, q.x + 8 * dpr, q.y + 4 * dpr);
+        }
+
+        // Draw ear top points (GREEN)
+        ctx.fillStyle = colors.ear;
+        ctx.font = `${10 * dpr}px monospace`;
+        const earPoints = [
+          { idx: EAR_LANDMARKS.LEFT_EAR_TOP, label: '#234' },
+          { idx: EAR_LANDMARKS.LEFT_EAR_MID, label: '#93' },
+          { idx: EAR_LANDMARKS.RIGHT_EAR_TOP, label: '#454' },
+          { idx: EAR_LANDMARKS.RIGHT_EAR_MID, label: '#323' },
+        ];
+        for (const pt of earPoints) {
+          const p = lm[pt.idx];
+          if (!p) continue;
+          const q = map(p);
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, 4 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillText(pt.label, q.x + 6 * dpr, q.y);
+        }
+
+        // Draw temple points (YELLOW)
+        ctx.fillStyle = colors.temple;
+        const templePoints = [
+          { idx: EAR_LANDMARKS.LEFT_TEMPLE, label: '#127' },
+          { idx: EAR_LANDMARKS.RIGHT_TEMPLE, label: '#356' },
+          { idx: EAR_LANDMARKS.LEFT_JAW, label: '#147' },
+          { idx: EAR_LANDMARKS.RIGHT_JAW, label: '#376' },
+        ];
+        for (const pt of templePoints) {
+          const p = lm[pt.idx];
+          if (!p) continue;
+          const q = map(p);
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, 3 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillText(pt.label, q.x + 5 * dpr, q.y);
+        }
+
+        // Draw face reference (RED)
+        ctx.fillStyle = colors.reference;
+        const refPoints = [
+          { idx: EAR_LANDMARKS.NOSE_TIP, label: '#1' },
+          { idx: EAR_LANDMARKS.CHIN, label: '#152' },
+          { idx: EAR_LANDMARKS.FOREHEAD, label: '#10' },
+        ];
+        for (const pt of refPoints) {
+          const p = lm[pt.idx];
+          if (!p) continue;
+          const q = map(p);
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, 4 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillText(pt.label, q.x + 5 * dpr, q.y);
+        }
+
+        // Draw lines from ear top to lobe
+        ctx.strokeStyle = 'rgba(0, 255, 255, 0.5)';
+        ctx.lineWidth = 2 * dpr;
+        
+        // Left side
+        const leftTop = lm[EAR_LANDMARKS.LEFT_EAR_TOP];
+        const leftLobe = lm[EAR_LANDMARKS.LEFT_EAR_LOBE_A];
+        if (leftTop && leftLobe) {
+          const t = map(leftTop), l = map(leftLobe);
+          ctx.beginPath();
+          ctx.moveTo(t.x, t.y);
+          ctx.lineTo(l.x, l.y);
+          ctx.stroke();
+        }
+
+        // Right side
+        const rightTop = lm[EAR_LANDMARKS.RIGHT_EAR_TOP];
+        const rightLobe = lm[EAR_LANDMARKS.RIGHT_EAR_LOBE_A];
+        if (rightTop && rightLobe) {
+          const t = map(rightTop), l = map(rightLobe);
+          ctx.beginPath();
+          ctx.moveTo(t.x, t.y);
+          ctx.lineTo(l.x, l.y);
+          ctx.stroke();
+        }
       }
 
       ctx.restore();
