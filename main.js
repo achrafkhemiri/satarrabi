@@ -10,11 +10,18 @@ import { RGBELoader } from 'jsm/loaders/RGBELoader.js';
 let scene, camera, renderer;
 let earringLeft, earringRight;
 let config = null;
+let baseEarringScale = 1;
 
 // Position offsets for ear lobes (tweak these for perfect placement)
 const OFFSETS = {
-  LEFT: { x: -0.012, y: -0.015 },   // Screen right (user's left)
-  RIGHT: { x: 0.012, y: -0.015 }    // Screen left (user's right)
+  LEFT: { x: 0.0, y: 0.0 },   // Exact anchor on #132
+  RIGHT: { x: 0.0, y: 0.0 }   // Exact anchor on #361
+};
+
+// Base local orientation so earrings hang down instead of lying horizontal.
+const BASE_ROT = {
+  LEFT: { x: 0, y: 0, z: 0 },
+  RIGHT: { x: 0, y: 0, z: 0 }
 };
 
 // Smoothing for positions
@@ -40,8 +47,46 @@ class Smoother {
   }
 }
 
-const smoothLeft = new Smoother(0.6);
-const smoothRight = new Smoother(0.6);
+const smoothLeft = new Smoother(1.0);
+const smoothRight = new Smoother(1.0);
+
+function computeTopAnchorPoint(root) {
+  root.updateMatrixWorld(true);
+
+  const invRoot = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  let maxY = -Infinity;
+  let best = null;
+
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry?.attributes?.position) return;
+    const pos = node.geometry.attributes.position;
+    const toRoot = new THREE.Matrix4().multiplyMatrices(invRoot, node.matrixWorld);
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(toRoot);
+      if (v.y > maxY) maxY = v.y;
+    }
+  });
+
+  const yBand = 0.01;
+  root.traverse((node) => {
+    if (!node.isMesh || !node.geometry?.attributes?.position) return;
+    const pos = node.geometry.attributes.position;
+    const toRoot = new THREE.Matrix4().multiplyMatrices(invRoot, node.matrixWorld);
+    const v = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(toRoot);
+      if (maxY - v.y > yBand) continue;
+      const score = Math.abs(v.x) + Math.abs(v.z) * 0.35;
+      if (!best || score < best.score) best = { point: v.clone(), score };
+    }
+  });
+
+  if (best?.point) return best.point;
+
+  const box = new THREE.Box3().setFromObject(root);
+  return new THREE.Vector3((box.min.x + box.max.x) * 0.5, box.max.y, (box.min.z + box.max.z) * 0.5);
+}
 
 export function initEarringTryOn(options) {
   config = options;
@@ -95,27 +140,32 @@ export function initEarringTryOn(options) {
   const loader = new GLTFLoader();
   loader.load('./boucle2.glb',
     (gltf) => {
-      const model = gltf.scene;
+      const modelTemplate = gltf.scene;
       
-      // Normalize scale
-      const box = new THREE.Box3().setFromObject(model);
+      // Normalize scale (kept on parent groups for stable summit anchoring)
+      const box = new THREE.Box3().setFromObject(modelTemplate);
       const size = box.getSize(new THREE.Vector3());
       const maxDim = Math.max(size.x, size.y, size.z);
-      const scale = 0.15 / maxDim;
-      model.scale.set(scale, scale, scale);
-      
-      // Center
-      const center = box.getCenter(new THREE.Vector3());
-      model.position.sub(center.multiplyScalar(scale));
-      
-      // Create left earring
-      earringLeft = model.clone();
+      const scale = 0.42 / maxDim;
+      baseEarringScale = scale;
+      const topAnchor = computeTopAnchorPoint(modelTemplate);
+
+      // Left earring: parent tracks landmark, child shifted so summit sits at parent origin.
+      const leftModel = modelTemplate.clone(true);
+      leftModel.position.set(-topAnchor.x, -topAnchor.y, -topAnchor.z);
+
+      earringLeft = new THREE.Group();
+      earringLeft.add(leftModel);
       earringLeft.visible = false;
       scene.add(earringLeft);
       
-      // Create right earring (mirrored)
-      earringRight = model.clone();
-      earringRight.scale.x *= -1; // Mirror
+      // Right earring: mirror child mesh while keeping same summit anchor logic.
+      const rightModel = modelTemplate.clone(true);
+      rightModel.position.set(-topAnchor.x, -topAnchor.y, -topAnchor.z);
+      rightModel.scale.x *= -1;
+
+      earringRight = new THREE.Group();
+      earringRight.add(rightModel);
       earringRight.visible = false;
       scene.add(earringRight);
       
@@ -144,6 +194,7 @@ export function initEarringTryOn(options) {
 
 export function updateEarringTryOn(data) {
   if (!earringLeft || !earringRight || !data.earLobes) return;
+  if (!data.earLobes.left || !data.earLobes.right) return;
   
   const showEarrings = config?.showEarrings?.() ?? true;
   if (!showEarrings) {
@@ -153,20 +204,24 @@ export function updateEarringTryOn(data) {
     return;
   }
   
-  const { earLobes, rot9, w, h, mirrorPreview } = data;
+  const { landmarks, earLobes, rot9, w, h, mirrorPreview } = data;
   const aspect = w / h;
+
+  // Hard-lock anchors to FaceMesh points #132 (left) and #361 (right).
+  const anchorLeft = landmarks?.[132] || earLobes.left;
+  const anchorRight = landmarks?.[361] || earLobes.right;
   
   // Apply offsets to ear lobe positions
   const leftPos = {
-    x: earLobes.left.x + OFFSETS.LEFT.x,
-    y: earLobes.left.y + OFFSETS.LEFT.y,
-    z: earLobes.left.z || 0
+    x: anchorLeft.x + OFFSETS.LEFT.x,
+    y: anchorLeft.y + OFFSETS.LEFT.y,
+    z: anchorLeft.z || 0
   };
   
   const rightPos = {
-    x: earLobes.right.x + OFFSETS.RIGHT.x,
-    y: earLobes.right.y + OFFSETS.RIGHT.y,
-    z: earLobes.right.z || 0
+    x: anchorRight.x + OFFSETS.RIGHT.x,
+    y: anchorRight.y + OFFSETS.RIGHT.y,
+    z: anchorRight.z || 0
   };
   
   // Smooth positions
@@ -188,12 +243,12 @@ export function updateEarringTryOn(data) {
   // Left ear (user's left = screen right when mirrored)
   const lx = toThreeX(smoothedLeft.x, mirrorPreview);
   const ly = toThreeY(smoothedLeft.y);
-  earringLeft.position.set(lx, ly, smoothedLeft.z * 2);
+  earringLeft.position.set(lx, ly, 0);
   
   // Right ear (user's right = screen left when mirrored)
   const rx = toThreeX(smoothedRight.x, mirrorPreview);
   const ry = toThreeY(smoothedRight.y);
-  earringRight.position.set(rx, ry, smoothedRight.z * 2);
+  earringRight.position.set(rx, ry, 0);
   
   // Apply rotation from OpenCV pose
   if (rot9 && rot9.length === 9) {
@@ -207,23 +262,23 @@ export function updateEarringTryOn(data) {
     const euler = new THREE.Euler().setFromRotationMatrix(rotMat, 'XYZ');
     
     // Apply rotation with some dampening
-    earringLeft.rotation.x = euler.x * 0.3;
-    earringLeft.rotation.y = euler.y * 0.5;
-    earringLeft.rotation.z = euler.z * 0.5;
+    earringLeft.rotation.x = euler.x * 0.2 + BASE_ROT.LEFT.x;
+    earringLeft.rotation.y = euler.y * 0.3 + BASE_ROT.LEFT.y;
+    earringLeft.rotation.z = euler.z * 0.3 + BASE_ROT.LEFT.z;
     
-    earringRight.rotation.x = euler.x * 0.3;
-    earringRight.rotation.y = -euler.y * 0.5; // Mirror Y rotation
-    earringRight.rotation.z = -euler.z * 0.5; // Mirror Z rotation
+    earringRight.rotation.x = euler.x * 0.2 + BASE_ROT.RIGHT.x;
+    earringRight.rotation.y = -euler.y * 0.3 + BASE_ROT.RIGHT.y; // Mirror Y rotation
+    earringRight.rotation.z = -euler.z * 0.3 + BASE_ROT.RIGHT.z; // Mirror Z rotation
   }
   
   // Scale based on distance
   const dist = data.tvec?.z || 500;
-  const scaleFactor = Math.max(0.5, Math.min(2, 500 / Math.abs(dist)));
-  const baseScale = earringLeft.scale.x;
+  const scaleFactor = Math.max(0.9, Math.min(2.6, 460 / Math.abs(dist)));
+  const baseScale = baseEarringScale || Math.abs(earringLeft.scale.x) || 0.01;
+  const currentScale = baseScale * scaleFactor;
   
-  earringLeft.scale.setScalar(baseScale * scaleFactor);
-  earringRight.scale.setScalar(baseScale * scaleFactor);
-  earringRight.scale.x *= -1; // Keep mirror
+  earringLeft.scale.setScalar(currentScale);
+  earringRight.scale.setScalar(currentScale);
   
   // Make visible
   earringLeft.visible = true;

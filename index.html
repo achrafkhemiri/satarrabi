@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>Virtual Earring Try-On | OpenCV + MediaPipe</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
 
   <!-- MediaPipe -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
@@ -30,55 +33,252 @@
   </script>
 
   <style>
-    html, body { margin:0; height:100%; overflow:hidden; background:#1a1a2e; font-family: system-ui, sans-serif; }
-    #stack { position:relative; width:100vw; height:100vh; }
-    #canvas, #three-canvas {
-      position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;
+    :root {
+      --bg-1: #0a1f2f;
+      --bg-2: #12334a;
+      --panel: rgba(10, 22, 33, 0.72);
+      --stroke: rgba(149, 205, 255, 0.25);
+      --text: #e9f4ff;
+      --text-soft: #b4ccdf;
+      --accent: #ff7a45;
+      --accent-2: #34d1bf;
+      --radius: 18px;
+      --shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
     }
-    #video { position:absolute; inset:0; width:0; height:0; opacity:0; }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background:
+        radial-gradient(circle at 12% 18%, rgba(52, 209, 191, 0.16), transparent 38%),
+        radial-gradient(circle at 87% 83%, rgba(255, 122, 69, 0.2), transparent 42%),
+        linear-gradient(145deg, var(--bg-1) 0%, var(--bg-2) 100%);
+      color: var(--text);
+      font-family: 'Space Grotesk', sans-serif;
+      overflow-x: hidden;
+    }
+
+    .app-shell {
+      min-height: 100vh;
+      padding: 22px;
+    }
+
+    .topbar {
+      margin: 0 auto 16px;
+      max-width: 1400px;
+      padding: 16px 20px;
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius);
+      background: var(--panel);
+      backdrop-filter: blur(12px);
+      box-shadow: var(--shadow);
+    }
+
+    .topbar h1 {
+      margin: 0;
+      font-family: 'Sora', sans-serif;
+      font-size: clamp(1.05rem, 1.1rem + 0.8vw, 1.9rem);
+      letter-spacing: 0.04em;
+      font-weight: 700;
+    }
+
+    .topbar p {
+      margin: 7px 0 0;
+      color: var(--text-soft);
+      font-size: 0.92rem;
+    }
+
+    .workspace {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: minmax(230px, 300px) minmax(320px, 740px) minmax(230px, 300px);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius);
+      background: var(--panel);
+      backdrop-filter: blur(12px);
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    .panel-title {
+      margin: 2px 0 12px;
+      font-size: 0.84rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-2);
+    }
+
+    .viewer-wrap {
+      display: grid;
+      justify-items: center;
+      gap: 14px;
+    }
+
+    #stack {
+      position: relative;
+      width: min(66vw, 720px);
+      aspect-ratio: 4 / 5;
+      border-radius: 24px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+      background: #040a11;
+    }
+
+    #canvas, #three-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    #video {
+      position: absolute;
+      inset: 0;
+      width: 0;
+      height: 0;
+      opacity: 0;
+    }
 
     #info {
-      position:absolute; top:10px; left:10px; z-index:5;
-      background:rgba(0,0,0,.7); color:#0f0; padding:12px; border-radius:8px;
-      font:13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      min-width:260px; white-space:pre; border: 1px solid #0f03;
+      margin: 0;
+      min-height: 270px;
+      padding: 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(52, 209, 191, 0.35);
+      background: rgba(0, 0, 0, 0.24);
+      white-space: pre-wrap;
+      color: #abffd5;
+      font: 12.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      line-height: 1.45;
     }
-    
+
     #controls {
-      position:absolute; top:10px; right:10px; z-index:5;
-      background:rgba(0,0,0,.7); color:#fff; padding:12px; border-radius:8px;
-      font:14px system-ui; border: 1px solid #fff3;
+      border: 1px solid rgba(255, 122, 69, 0.34);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      padding: 14px;
     }
-    #controls label { display:block; margin:6px 0; cursor:pointer; user-select:none; }
-    #controls input[type="checkbox"] { margin-right: 8px; }
+
+    #controls label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 10px 0;
+      cursor: pointer;
+      user-select: none;
+      color: var(--text);
+      font-size: 0.92rem;
+    }
+
+    #controls input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--accent);
+      margin: 0;
+    }
+
+    .hint-card {
+      margin-top: 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 11px;
+      color: var(--text-soft);
+      font-size: 0.84rem;
+      line-height: 1.45;
+    }
 
     #capture-btn {
-      position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
-      z-index:5; padding:12px 30px; background:#e84393; color:#fff;
-      border:none; border-radius:25px; font-size:16px; cursor:pointer;
-      transition: all 0.3s;
+      z-index: 5;
+      padding: 11px 30px;
+      border: 0;
+      border-radius: 999px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      color: #091825;
+      background: linear-gradient(120deg, var(--accent) 0%, #ffb454 100%);
+      box-shadow: 0 10px 24px rgba(255, 122, 69, 0.35);
+      transition: transform 0.22s ease, box-shadow 0.22s ease;
     }
-    #capture-btn:hover { background:#fd79a8; transform:translateX(-50%) scale(1.05); }
 
-    .landmark-label { font-size: 10px; }
+    #capture-btn:hover {
+      transform: translateY(-2px) scale(1.02);
+      box-shadow: 0 16px 28px rgba(255, 122, 69, 0.42);
+    }
+
+    @media (max-width: 1160px) {
+      .workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .viewer-wrap {
+        order: 1;
+      }
+
+      .panel-left {
+        order: 2;
+      }
+
+      .panel-right {
+        order: 3;
+      }
+
+      #stack {
+        width: min(92vw, 560px);
+      }
+
+      #info {
+        min-height: 220px;
+      }
+    }
   </style>
 </head>
 <body>
-  <div id="stack">
-    <video id="video" autoplay playsinline muted></video>
-    <canvas id="canvas"></canvas>
-    <canvas id="three-canvas"></canvas>
+  <div class="app-shell">
+    <header class="topbar">
+      <h1>Virtual Earring Studio</h1>
+      <p>Affichage camera reduit, panneaux externes, interface plus claire pour le controle et le debug.</p>
+    </header>
 
-    <div id="info">Loading OpenCV…</div>
-    
-    <div id="controls">
-      <label><input id="mirrorPreview" type="checkbox"> Mirror preview</label>
-      <label><input id="showAllLandmarks" type="checkbox"> Show all 468 points</label>
-      <label><input id="showEarLandmarks" type="checkbox" checked> Show ear landmarks</label>
-      <label><input id="showEarrings" type="checkbox" checked> Show earrings</label>
-    </div>
+    <main class="workspace">
+      <aside class="panel panel-left">
+        <h2 class="panel-title">Suivi en direct</h2>
+        <div id="info">Loading OpenCV...</div>
+      </aside>
 
-    <button id="capture-btn">📸 Capture</button>
+      <section class="viewer-wrap">
+        <div id="stack">
+          <video id="video" autoplay playsinline muted></video>
+          <canvas id="canvas"></canvas>
+          <canvas id="three-canvas"></canvas>
+        </div>
+        <button id="capture-btn">Capture image</button>
+      </section>
+
+      <aside class="panel panel-right">
+        <h2 class="panel-title">Controles</h2>
+        <div id="controls">
+          <label><input id="mirrorPreview" type="checkbox"> Mirror preview</label>
+          <label><input id="showAllLandmarks" type="checkbox"> Show all 468 points</label>
+          <label><input id="showEarLandmarks" type="checkbox" checked> Show ear landmarks</label>
+          <label><input id="showEarrings" type="checkbox" checked> Show earrings</label>
+        </div>
+        <div class="hint-card">
+          Activez seulement les reperes utiles pour garder un rendu propre et un meilleur framerate.
+        </div>
+      </aside>
+    </main>
   </div>
 
   <script type="module">
