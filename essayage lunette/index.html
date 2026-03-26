@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Yaw / Pitch / Roll — FaceMesh + OpenCV (with Z depth)</title>
+
+  <!-- MediaPipe -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.4.1646424915/camera_utils.js"></script>
+
+  <!-- OpenCV (fires 'opencv-ready') -->
+  <script>
+    window.Module = {
+      onRuntimeInitialized() {
+        window.dispatchEvent(new Event("opencv-ready"));
+      },
+    };
+  </script>
+  <script src="https://docs.opencv.org/4.10.0/opencv.js"></script>
+
+  <!-- Three.js (ESM) -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+        "jsm/":   "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <style>
+    html, body { margin:0; height:100%; overflow:hidden; background:#000; }
+    #stack { position:relative; width:100svw; height:100svh; }
+    #canvas, #three-canvas {
+      position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;
+    }
+    #video { position:absolute; inset:0; width:0; height:0; opacity:0; }
+
+    #info {
+      position:absolute; top:10px; left:10px; z-index:5;
+      background:rgba(0,0,0,.55); color:#fff; padding:10px; border-radius:8px;
+      font:14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-width:220px;
+      white-space:pre;
+    }
+    #controls {
+      position:absolute; top:10px; right:10px; z-index:5;
+      background:rgba(0,0,0,.55); color:#fff; padding:8px 10px; border-radius:8px;
+      font:14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    label { user-select:none; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div id="stack">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+    <canvas id="three-canvas"></canvas>
+
+    <div id="info">Loading OpenCV…</div>
+    <div id="controls">
+      <div style="margin-top:6px;"><label><input id="mirrorPreview" type="checkbox"> Mirror preview (video + 3D)</label></div>
+      <div style="margin-top:6px;"><label><input id="showLandmarks" type="checkbox" checked> Show landmarks</label></div>
+      <div style="margin-top:6px;"><label><input id="showEars" type="checkbox" checked> Show ear landmarks</label></div>
+    </div>
+  </div>
+
+  <script type="module">
+
+
+
+    import { initTryOn, updateTryOn } from './main1.js';
+
+    const video        = document.getElementById('video');
+    const canvas       = document.getElementById('canvas');
+    const ctx          = canvas.getContext('2d');
+    const info         = document.getElementById('info');
+    const chkPrev      = document.getElementById('mirrorPreview');
+    const chkDots      = document.getElementById('showLandmarks');
+    const chkEars      = document.getElementById('showEars');
+    const threeCanvas  = document.getElementById('three-canvas');
+
+    // Landmark indices
+    const LM = {
+      LEFT_CORNER: 33,
+      RIGHT_CORNER: 263,
+      NOSE_TIP: 1,
+      CENTER_STABLE: 168,
+      TEMPLE_LEFT: 127,
+      TEMPLE_RIGHT: 356,
+      // Ear landmarks
+      LEFT_EAR_TOP: 234,
+      RIGHT_EAR_TOP: 454
+    };
+
+    // DPR-aware sizing (pixel-perfect; no CSS stretching)
+    function setCanvasSizeToViewport(canvasEl) {
+      const cssW = Math.round(document.getElementById('stack').clientWidth);
+      const cssH = Math.round(document.getElementById('stack').clientHeight);
+
+
+        const isAndroid = /Android/i.test(navigator.userAgent);
+        const dprCap = isAndroid ? 1.5 : 2; // ← cap plus bas sur Android
+        const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, dprCap));
+   
+       canvasEl.style.width  = cssW + 'px';
+      canvasEl.style.height = cssH + 'px';
+      canvasEl.width  = Math.floor(cssW * dpr);
+      canvasEl.height = Math.floor(cssH * dpr);
+      return dpr;
+    }
+
+    let dpr = setCanvasSizeToViewport(canvas);
+    setCanvasSizeToViewport(threeCanvas);
+    window.addEventListener('resize', () => {
+      dpr = setCanvasSizeToViewport(canvas);
+      setCanvasSizeToViewport(threeCanvas);
+    });
+
+
+
+
+
+
+
+
+const isAndroid = /Android/i.test(navigator.userAgent);
+
+// 1) Taille / framerate caméra : borne inférieure sur Android
+const constraints = {
+  audio: false,
+  video: {
+    facingMode: 'user',
+    width:  { ideal: isAndroid ? 960 : 1280, max: isAndroid ? 1280 : 1920 },
+    height: { ideal: isAndroid ? 720 : 720,  max: 1080 },
+    frameRate: { ideal: 30, max: 30 } // évite 60 fps qui sature le CPU
+  }
+};
+
+
+
+
+
+
+    // Draw the video with true object-fit: cover
+    function drawVideoCover(ctx, videoEl) {
+      const dstW = canvas.width, dstH = canvas.height;
+      const srcW = videoEl.videoWidth || 1;
+      const srcH = videoEl.videoHeight || 1;
+
+      const scale = Math.max(dstW / srcW, dstH / srcH);
+      const drawW = Math.round(srcW * scale);
+      const drawH = Math.round(srcH * scale);
+      const dx = Math.floor((dstW - drawW) * 0.5);
+      const dy = Math.floor((dstH - drawH) * 0.5);
+
+      ctx.save();
+      ctx.setTransform(1,0,0,1,0,0);
+      ctx.clearRect(0, 0, dstW, dstH);
+      if (chkPrev.checked) { ctx.translate(dstW, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(videoEl, 0, 0, srcW, srcH, dx, dy, drawW, drawH);
+      ctx.restore();
+
+      return { dx, dy, drawW, drawH, dstW, dstH, srcW, srcH, dpr };
+    }
+
+    function drawLandmarksCover(ctx, lm, cover) {
+      if (!chkDots.checked && !chkEars.checked) return;
+
+      const map = (p) => {
+        const x = cover.dx + p.x * cover.drawW;
+        const y = cover.dy + p.y * cover.drawH;
+        return chkPrev.checked ? { x: cover.dstW - x, y } : { x, y };
+      };
+
+      ctx.save();
+
+      if (chkDots.checked) {
+        const L = lm[LM.LEFT_CORNER];
+        const R = lm[LM.RIGHT_CORNER];
+        const N = lm[LM.NOSE_TIP];
+        const C = lm[LM.CENTER_STABLE];
+
+        ctx.fillStyle = 'rgba(255,0,0,0.95)';
+        for (const p of [L, R, N]) {
+          if (!p) continue;
+          const q = map(p);
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, 3 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        if (C) {
+          const qC = map(C);
+          ctx.fillStyle = 'rgba(0, 200, 255, 0.95)';
+          ctx.beginPath();
+          ctx.arc(qC.x, qC.y, 3 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      if (chkEars.checked) {
+        const leftEarTop = lm[LM.LEFT_EAR_TOP];
+        const rightEarTop = lm[LM.RIGHT_EAR_TOP];
+        const leftTemple = lm[LM.TEMPLE_LEFT];
+        const rightTemple = lm[LM.TEMPLE_RIGHT];
+
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.95)';
+        for (const p of [leftEarTop, rightEarTop]) {
+          if (!p) continue;
+          const q = map(p);
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, 4 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = 'rgba(255, 255, 0, 0.95)';
+        for (const p of [leftTemple, rightTemple]) {
+          if (!p) continue;
+          const q = map(p);
+          ctx.beginPath();
+          ctx.arc(q.x, q.y, 4 * dpr, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.strokeStyle = 'rgba(0, 255, 150, 0.7)';
+        ctx.lineWidth = 2 * dpr;
+
+        if (leftTemple && leftEarTop) {
+          const tL = map(leftTemple);
+          const eL = map(leftEarTop);
+          ctx.beginPath();
+          ctx.moveTo(tL.x, tL.y);
+          ctx.lineTo(eL.x, eL.y);
+          ctx.stroke();
+        }
+
+        if (rightTemple && rightEarTop) {
+          const tR = map(rightTemple);
+          const eR = map(rightEarTop);
+          ctx.beginPath();
+          ctx.moveTo(tR.x, tR.y);
+          ctx.lineTo(eR.x, eR.y);
+          ctx.stroke();
+        }
+      }
+
+      ctx.restore();
+    }
+
+
+
+
+
+
+
+    
+    // OpenCV intrinsics + helpers
+    function makeCameraMatrix(width, height) {
+      const f = 0.5 * (width + height);
+      const cx = width * 0.5, cy = height * 0.5;
+      return {
+        K: cv.matFromArray(3, 3, cv.CV_64FC1, [ f,0,cx,  0,f,cy,  0,0,1 ]),
+        fx: f, fy: f, cx, cy
+      };
+    }
+    function getModelPoints() {
+      return cv.matFromArray(6, 3, cv.CV_64FC1, [
+         0.0,   0.0,    0.0,
+         0.0, -63.6,  -12.5,
+       -43.3,  32.7,  -26.0,
+        43.3,  32.7,  -26.0,
+       -28.9, -28.9,  -24.1,
+        28.9, -28.9,  -24.1
+      ]);
+    }
+
+    function boot() {
+      info.textContent = 'OpenCV loaded. Initializing…';
+
+      // Init 3D layer
+      initTryOn({ canvas: threeCanvas, mirrorPreview: () => chkPrev.checked });
+
+      let camMat = null, distCoeffs = null, modelPts = null;
+      let rvecPrev = null, tvecPrev = null;
+
+      const SMOOTH_A_R = 0.7;
+      const SMOOTH_A_T = 0.7;
+
+      let landmarkBuffer = [];
+      const LANDMARK_BUFFER_SIZE = 1;
+
+      const faceMesh = new FaceMesh({
+        locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}`
+      });
+      
+      const isAndroid = /Android/i.test(navigator.userAgent);
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: !isAndroid, // ← OFF sur Android
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7,
+        selfieMode: false
+      });
+
+      faceMesh.onResults(results => {
+        const cover = drawVideoCover(ctx, video);
+
+        if (!camMat) {
+          const vW = video.videoWidth  || results.image?.width  || 1280;
+          const vH = video.videoHeight || results.image?.height || 720;
+          const cam = makeCameraMatrix(vW, vH);
+          camMat = cam.K;
+          distCoeffs = cv.Mat.zeros(5, 1, cv.CV_64FC1);
+          modelPts = getModelPoints();
+          window.__INTRINSICS__ = { fx: cam.fx, fy: cam.fy, cx: cam.cx, cy: cam.cy };
+        }
+
+        const faces = results.multiFaceLandmarks;
+        if (!faces || !faces.length) { info.textContent = 'No face detected'; return; }
+        let lm = faces[0];
+
+        // Light temporal smoothing for landmarks
+        landmarkBuffer.push([...lm]);
+        if (landmarkBuffer.length > LANDMARK_BUFFER_SIZE) landmarkBuffer.shift();
+        if (landmarkBuffer.length >= 2) {
+          const smoothed = [];
+          for (let i = 0; i < lm.length; i++) {
+            let ax=0, ay=0, az=0;
+            for (const frame of landmarkBuffer) { ax+=frame[i].x; ay+=frame[i].y; az+=frame[i].z||0; }
+            const n = landmarkBuffer.length;
+            smoothed[i] = { x: ax/n, y: ay/n, z: az/n };
+          }
+          lm = smoothed;
+        }
+
+        const imgW = video.videoWidth  || 1280;
+        const imgH = video.videoHeight || 720;
+
+        const idx = [1, 199, 263, 33, 291, 61];
+        const imagePoints = cv.Mat.zeros(6, 2, cv.CV_64FC1);
+        for (let i = 0; i < idx.length; i++) {
+          const p = lm[idx[i]];
+          imagePoints.doublePtr(i, 0)[0] = p.x * imgW;
+          imagePoints.doublePtr(i, 1)[0] = p.y * imgH;
+        }
+
+        const rvec = rvecPrev ? rvecPrev.clone() : cv.Mat.zeros(3, 1, cv.CV_64FC1);
+        const tvec = tvecPrev ? tvecPrev.clone() : cv.Mat.zeros(3, 1, cv.CV_64FC1);
+
+        const ok = cv.solvePnP(
+          modelPts, imagePoints, camMat, distCoeffs,
+          rvec, tvec, rvecPrev !== null, cv.SOLVEPNP_ITERATIVE
+        );
+
+        if (ok) {
+          if (rvecPrev) {
+            const d = rvec.data64F, dp = rvecPrev.data64F;
+            d[0]=SMOOTH_A_R*d[0]+(1-SMOOTH_A_R)*dp[0];
+            d[1]=SMOOTH_A_R*d[1]+(1-SMOOTH_A_R)*dp[1];
+            d[2]=SMOOTH_A_R*d[2]+(1-SMOOTH_A_R)*dp[2];
+          }
+
+          if (tvecPrev) {
+            const d = tvec.data64F, dp = tvecPrev.data64F;
+            d[0]=SMOOTH_A_T*d[0]+(1-SMOOTH_A_T)*dp[0];
+            d[1]=SMOOTH_A_T*d[1]+(1-SMOOTH_A_T)*dp[1];
+            d[2]=SMOOTH_A_T*d[2]+(1-SMOOTH_A_T)*dp[2];
+          }
+
+          const rot9 = (function r2m() {
+            const R = new cv.Mat(); cv.Rodrigues(rvec, R);
+            const arr = Array.from(R.data64F); R.delete();
+            return arr;
+          })();
+
+          const zmm = Math.abs(tvec.data64F[2]);
+          const zcm = (zmm / 10).toFixed(1);
+
+          updateTryOn({
+            landmarks: lm,
+            rot9,
+            w: imgW, h: imgH,
+            mirrorPreview: chkPrev.checked,
+            timestampMs: performance.now(),
+            tvec: { x: tvec.data64F[0], y: tvec.data64F[1], z: tvec.data64F[2] },
+            intrinsics: window.__INTRINSICS__
+          });
+
+          let earInfo = '';
+          if (lm[LM.LEFT_EAR_TOP] && lm[LM.RIGHT_EAR_TOP]) earInfo = '\nEars: detected';
+          else earInfo = '\nEars: not visible';
+
+          info.textContent = `Running…
+dist: ${zcm} cm${earInfo}`;
+
+          if (rvecPrev) rvecPrev.delete();
+          if (tvecPrev) tvecPrev.delete();
+          rvecPrev = rvec.clone();
+          tvecPrev = tvec.clone();
+        } else {
+          info.textContent = 'solvePnP failed';
+        }
+
+        drawLandmarksCover(ctx, lm, cover);
+        rvec.delete(); tvec.delete(); imagePoints.delete();
+      });
+
+      (async () => {
+        try {
+          const isMobile = /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+          const cssW = document.getElementById('stack').clientWidth;
+          const cssH = document.getElementById('stack').clientHeight;
+          const targetAR = cssW / Math.max(1, cssH);
+
+          const constraints = {
+            audio: false,
+            video: {
+              facingMode: 'user',
+              aspectRatio: { ideal: targetAR },
+              width:  { ideal: isMobile ? 1280 : 1280, max: 1920 },
+              height: { ideal: isMobile ?  960 :  720, max: 1080 }
+            }
+          };
+
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          video.srcObject = stream;
+          await video.play();
+
+          await new Promise(r => {
+            const check = () => (video.videoWidth>0 && video.videoHeight>0) ? r() : requestAnimationFrame(check);
+            check();
+          });
+
+          const useRVFC = typeof video.requestVideoFrameCallback === 'function';
+          const pump = async () => {
+            try { await faceMesh.send({ image: video }); } catch {}
+            if (useRVFC) video.requestVideoFrameCallback(pump);
+            else requestAnimationFrame(pump);
+          };
+          pump();
+        } catch (err) {
+          console.error('Camera init error:', err);
+          info.textContent = 'Camera error. Allow access and refresh.';
+        }
+      })();
+
+      window.addEventListener('beforeunload', () => {
+        camMat?.delete(); distCoeffs?.delete(); modelPts?.delete();
+        if (rvecPrev) rvecPrev.delete();
+        if (tvecPrev) tvecPrev.delete();
+      });
+    }
+
+    const startIfReady = () => { if (window.cv && typeof cv.Mat === 'function') boot(); };
+    window.addEventListener('opencv-ready', startIfReady);
+    startIfReady();
+  </script>
+</body>
+</html>

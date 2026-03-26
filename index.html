@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Virtual Earring Try-On | OpenCV + MediaPipe</title>
+
+  <!-- MediaPipe -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.4.1646424915/camera_utils.js"></script>
+
+  <!-- OpenCV -->
+  <script>
+    window.Module = {
+      onRuntimeInitialized() {
+        window.dispatchEvent(new Event("opencv-ready"));
+      },
+    };
+  </script>
+  <script src="https://docs.opencv.org/4.10.0/opencv.js"></script>
+
+  <!-- Three.js -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+        "jsm/": "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <style>
+    html, body { margin:0; height:100%; overflow:hidden; background:#0a0a0a; font-family: system-ui, sans-serif; }
+    #stack { position:relative; width:100vw; height:100vh; }
+    #canvas {
+      position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;
+    }
+    #three-canvas {
+      position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none;
+      z-index: 10;
+    }
+    #video { position:absolute; inset:0; width:0; height:0; opacity:0; }
+
+    #info {
+      position:absolute; top:10px; left:10px; z-index:20;
+      background:rgba(0,0,0,.85); color:#0f0; padding:14px 18px; border-radius:12px;
+      font:12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      min-width:220px; white-space:pre; border: 1px solid #0f04;
+      backdrop-filter: blur(10px);
+    }
+    
+    #controls {
+      position:absolute; top:10px; right:10px; z-index:20;
+      background:rgba(0,0,0,.85); color:#fff; padding:14px 18px; border-radius:12px;
+      font:13px system-ui; border: 1px solid #fff2;
+      backdrop-filter: blur(10px);
+    }
+    #controls label { display:flex; align-items:center; margin:8px 0; cursor:pointer; user-select:none; }
+    #controls input[type="checkbox"] { 
+      margin-right: 10px; width:18px; height:18px; 
+      accent-color: #e84393;
+    }
+
+    #capture-btn {
+      position:absolute; bottom:30px; left:50%; transform:translateX(-50%);
+      z-index:20; padding:14px 40px; background: linear-gradient(135deg, #e84393, #a855f7);
+      color:#fff; border:none; border-radius:30px; font-size:16px; font-weight:600;
+      cursor:pointer; transition: all 0.3s; box-shadow: 0 4px 20px rgba(232,67,147,0.4);
+    }
+    #capture-btn:hover { 
+      transform:translateX(-50%) scale(1.05); 
+      box-shadow: 0 6px 30px rgba(232,67,147,0.6);
+    }
+
+    .landmark-label { font-size: 10px; }
+  </style>
+</head>
+<body>
+  <div id="stack">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+    <canvas id="three-canvas"></canvas>
+
+    <div id="info">Loading OpenCV…</div>
+    
+    <div id="controls">
+      <label><input id="mirrorPreview" type="checkbox"> Mirror preview</label>
+      <label><input id="showEarLandmarks" type="checkbox"> Show ear points</label>
+      <label><input id="showEarrings" type="checkbox" checked> Show earrings</label>
+    </div>
+
+    <button id="capture-btn">📸 Capture</button>
+  </div>
+
+  <script type="module">
+    import { initEarringTryOn, updateEarringTryOn } from './main.js';
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const info = document.getElementById('info');
+    const threeCanvas = document.getElementById('three-canvas');
+    
+    const chkMirror = document.getElementById('mirrorPreview');
+    const chkAllLandmarks = document.getElementById('showAllLandmarks');
+    const chkEarLandmarks = document.getElementById('showEarLandmarks');
+    const chkShowEarrings = document.getElementById('showEarrings');
+    const captureBtn = document.getElementById('capture-btn');
+
+    // ALL ear-related landmark indices for debugging
+    const EAR_LANDMARKS = {
+      // Left side (user's left = screen right)
+      LEFT_EAR_TOP: 234,
+      LEFT_EAR_MID: 93,
+      LEFT_EAR_LOBE_A: 132,  // Good candidate
+      LEFT_EAR_LOBE_B: 172,  // Lower candidate
+      LEFT_TEMPLE: 127,
+      LEFT_CHEEK: 116,
+      LEFT_JAW: 147,
+      
+      // Right side (user's right = screen left)  
+      RIGHT_EAR_TOP: 454,
+      RIGHT_EAR_MID: 323,
+      RIGHT_EAR_LOBE_A: 361, // Good candidate
+      RIGHT_EAR_LOBE_B: 397, // Lower candidate
+      RIGHT_TEMPLE: 356,
+      RIGHT_CHEEK: 345,
+      RIGHT_JAW: 376,
+      
+      // Face reference
+      NOSE_TIP: 1,
+      CHIN: 152,
+      FOREHEAD: 10,
+      LEFT_EYE: 33,
+      RIGHT_EYE: 263,
+      CENTER: 168
+    };
+
+    let dpr = 1;
+
+    function setCanvasSize(canvasEl) {
+      const cssW = document.getElementById('stack').clientWidth;
+      const cssH = document.getElementById('stack').clientHeight;
+      const isAndroid = /Android/i.test(navigator.userAgent);
+      const dprCap = isAndroid ? 1.5 : 2;
+      dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, dprCap));
+      
+      canvasEl.style.width = cssW + 'px';
+      canvasEl.style.height = cssH + 'px';
+      canvasEl.width = Math.floor(cssW * dpr);
+      canvasEl.height = Math.floor(cssH * dpr);
+      return dpr;
+    }
+
+    setCanvasSize(canvas);
+    setCanvasSize(threeCanvas);
+    window.addEventListener('resize', () => {
+      setCanvasSize(canvas);
+      setCanvasSize(threeCanvas);
+    });
+
+    function drawVideoCover(ctx, videoEl) {
+      const dstW = canvas.width, dstH = canvas.height;
+      const srcW = videoEl.videoWidth || 1;
+      const srcH = videoEl.videoHeight || 1;
+
+      const scale = Math.max(dstW / srcW, dstH / srcH);
+      const drawW = Math.round(srcW * scale);
+      const drawH = Math.round(srcH * scale);
+      const dx = Math.floor((dstW - drawW) * 0.5);
+      const dy = Math.floor((dstH - drawH) * 0.5);
+
+      ctx.save();
+      ctx.setTransform(1,0,0,1,0,0);
+      ctx.clearRect(0, 0, dstW, dstH);
+      if (chkMirror.checked) { ctx.translate(dstW, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(videoEl, 0, 0, srcW, srcH, dx, dy, drawW, drawH);
+      ctx.restore();
+
+      return { dx, dy, drawW, drawH, dstW, dstH, srcW, srcH, dpr };
+    }
+
+    function drawEarLandmarks(ctx, lm, cover) {
+      if (!chkEarLandmarks.checked) return;
+      
+      const map = (p) => {
+        const x = cover.dx + p.x * cover.drawW;
+        const y = cover.dy + p.y * cover.drawH;
+        return chkMirror.checked ? { x: cover.dstW - x, y } : { x, y };
+      };
+
+      ctx.save();
+
+      // Only draw main lobe points (CYAN)
+      ctx.fillStyle = '#00ffff';
+      ctx.font = `bold ${11 * dpr}px monospace`;
+      
+      const lobePoints = [
+        { idx: EAR_LANDMARKS.LEFT_EAR_LOBE_A, label: '#132' },
+        { idx: EAR_LANDMARKS.RIGHT_EAR_LOBE_A, label: '#361' },
+      ];
+      
+      for (const pt of lobePoints) {
+        const p = lm[pt.idx];
+        if (!p) continue;
+        const q = map(p);
+        ctx.beginPath();
+        ctx.arc(q.x, q.y, 5 * dpr, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillText(pt.label, q.x + 8 * dpr, q.y + 4 * dpr);
+      }
+
+      ctx.restore();
+    }
+
+    // OpenCV helpers
+    function makeCameraMatrix(width, height) {
+      const f = 0.5 * (width + height);
+      const cx = width * 0.5, cy = height * 0.5;
+      return {
+        K: cv.matFromArray(3, 3, cv.CV_64FC1, [f,0,cx, 0,f,cy, 0,0,1]),
+        fx: f, fy: f, cx, cy
+      };
+    }
+
+    function getModelPoints() {
+      return cv.matFromArray(6, 3, cv.CV_64FC1, [
+         0.0,   0.0,    0.0,
+         0.0, -63.6,  -12.5,
+       -43.3,  32.7,  -26.0,
+        43.3,  32.7,  -26.0,
+       -28.9, -28.9,  -24.1,
+        28.9, -28.9,  -24.1
+      ]);
+    }
+
+    function boot() {
+      info.textContent = 'OpenCV ready. Initializing…';
+
+      // Init 3D earring renderer
+      initEarringTryOn({ 
+        canvas: threeCanvas, 
+        mirrorPreview: () => chkMirror.checked,
+        showEarrings: () => chkShowEarrings.checked
+      });
+
+      let camMat = null, distCoeffs = null, modelPts = null;
+      let rvecPrev = null, tvecPrev = null;
+
+      const SMOOTH_R = 0.7, SMOOTH_T = 0.7;
+
+      const faceMesh = new FaceMesh({
+        locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${f}`
+      });
+
+      const isAndroid = /Android/i.test(navigator.userAgent);
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: !isAndroid,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7,
+        selfieMode: false
+      });
+
+      faceMesh.onResults(results => {
+        const cover = drawVideoCover(ctx, video);
+
+        if (!camMat) {
+          const vW = video.videoWidth || 1280;
+          const vH = video.videoHeight || 720;
+          const cam = makeCameraMatrix(vW, vH);
+          camMat = cam.K;
+          distCoeffs = cv.Mat.zeros(5, 1, cv.CV_64FC1);
+          modelPts = getModelPoints();
+          window.__INTRINSICS__ = { fx: cam.fx, fy: cam.fy, cx: cam.cx, cy: cam.cy };
+        }
+
+        const faces = results.multiFaceLandmarks;
+        if (!faces || !faces.length) {
+          info.textContent = 'No face detected\n\nMove closer to camera';
+          return;
+        }
+
+        const lm = faces[0];
+        const imgW = video.videoWidth || 1280;
+        const imgH = video.videoHeight || 720;
+
+        // SolvePnP for precise 3D pose
+        const idx = [1, 199, 263, 33, 291, 61];
+        const imagePoints = cv.Mat.zeros(6, 2, cv.CV_64FC1);
+        for (let i = 0; i < idx.length; i++) {
+          const p = lm[idx[i]];
+          imagePoints.doublePtr(i, 0)[0] = p.x * imgW;
+          imagePoints.doublePtr(i, 1)[0] = p.y * imgH;
+        }
+
+        const rvec = rvecPrev ? rvecPrev.clone() : cv.Mat.zeros(3, 1, cv.CV_64FC1);
+        const tvec = tvecPrev ? tvecPrev.clone() : cv.Mat.zeros(3, 1, cv.CV_64FC1);
+
+        const ok = cv.solvePnP(
+          modelPts, imagePoints, camMat, distCoeffs,
+          rvec, tvec, rvecPrev !== null, cv.SOLVEPNP_ITERATIVE
+        );
+
+        if (ok) {
+          // Smooth rotation
+          if (rvecPrev) {
+            const d = rvec.data64F, dp = rvecPrev.data64F;
+            d[0] = SMOOTH_R*d[0] + (1-SMOOTH_R)*dp[0];
+            d[1] = SMOOTH_R*d[1] + (1-SMOOTH_R)*dp[1];
+            d[2] = SMOOTH_R*d[2] + (1-SMOOTH_R)*dp[2];
+          }
+          // Smooth translation
+          if (tvecPrev) {
+            const d = tvec.data64F, dp = tvecPrev.data64F;
+            d[0] = SMOOTH_T*d[0] + (1-SMOOTH_T)*dp[0];
+            d[1] = SMOOTH_T*d[1] + (1-SMOOTH_T)*dp[1];
+            d[2] = SMOOTH_T*d[2] + (1-SMOOTH_T)*dp[2];
+          }
+
+          // Get rotation matrix
+          const rot9 = (() => {
+            const R = new cv.Mat();
+            cv.Rodrigues(rvec, R);
+            const arr = Array.from(R.data64F);
+            R.delete();
+            return arr;
+          })();
+
+          const zmm = Math.abs(tvec.data64F[2]);
+          const zcm = (zmm / 10).toFixed(1);
+
+          // Get ear lobe positions
+          const leftLobeA = lm[EAR_LANDMARKS.LEFT_EAR_LOBE_A];
+          const rightLobeA = lm[EAR_LANDMARKS.RIGHT_EAR_LOBE_A];
+
+          // Update 3D earrings
+          updateEarringTryOn({
+            landmarks: lm,
+            rot9,
+            w: imgW,
+            h: imgH,
+            mirrorPreview: chkMirror.checked,
+            tvec: { x: tvec.data64F[0], y: tvec.data64F[1], z: tvec.data64F[2] },
+            intrinsics: window.__INTRINSICS__,
+            earLobes: {
+              left: leftLobeA,
+              right: rightLobeA
+            }
+          });
+
+          // Update info panel
+          info.textContent = `✓ Face detected
+Distance: ${zcm} cm
+
+Ear Points (CYAN):
+  L: #132 (${leftLobeA?.x.toFixed(3)}, ${leftLobeA?.y.toFixed(3)})
+  R: #361 (${rightLobeA?.x.toFixed(3)}, ${rightLobeA?.y.toFixed(3)})
+
+Rotation:
+  Yaw: ${(rvec.data64F[1] * 180/Math.PI).toFixed(1)}°
+  Pitch: ${(rvec.data64F[0] * 180/Math.PI).toFixed(1)}°
+  Roll: ${(rvec.data64F[2] * 180/Math.PI).toFixed(1)}°`;
+
+          if (rvecPrev) rvecPrev.delete();
+          if (tvecPrev) tvecPrev.delete();
+          rvecPrev = rvec.clone();
+          tvecPrev = tvec.clone();
+        }
+
+        // Draw landmarks
+        drawEarLandmarks(ctx, lm, cover);
+        
+        rvec.delete();
+        tvec.delete();
+        imagePoints.delete();
+      });
+
+      // Start camera
+      (async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              facingMode: 'user',
+              width: { ideal: 1280 },
+              height: { ideal: 720 }
+            }
+          });
+          video.srcObject = stream;
+          await video.play();
+
+          await new Promise(r => {
+            const check = () => (video.videoWidth > 0) ? r() : requestAnimationFrame(check);
+            check();
+          });
+
+          const pump = async () => {
+            try { await faceMesh.send({ image: video }); } catch {}
+            requestAnimationFrame(pump);
+          };
+          pump();
+
+        } catch (err) {
+          info.textContent = 'Camera error: ' + err.message;
+        }
+      })();
+
+      // Capture button
+      captureBtn.addEventListener('click', () => {
+        const composite = document.createElement('canvas');
+        composite.width = canvas.width;
+        composite.height = canvas.height;
+        const cctx = composite.getContext('2d');
+        cctx.drawImage(canvas, 0, 0);
+        cctx.drawImage(threeCanvas, 0, 0);
+        
+        const link = document.createElement('a');
+        link.download = `earring-${Date.now()}.png`;
+        link.href = composite.toDataURL('image/png');
+        link.click();
+      });
+    }
+
+    const startIfReady = () => { if (window.cv && typeof cv.Mat === 'function') boot(); };
+    window.addEventListener('opencv-ready', startIfReady);
+    startIfReady();
+  </script>
+</body>
+</html>
