@@ -124,8 +124,8 @@
 
     #stack {
       position: relative;
-      width: min(66vw, 720px);
-      aspect-ratio: 4 / 5;
+      width: min(54vw, 560px);
+      aspect-ratio: 1 / 1;
       border-radius: 24px;
       overflow: hidden;
       border: 1px solid rgba(255, 255, 255, 0.16);
@@ -235,7 +235,7 @@
       }
 
       #stack {
-        width: min(92vw, 560px);
+        width: min(82vw, 420px);
       }
 
       #info {
@@ -246,11 +246,6 @@
 </head>
 <body>
   <div class="app-shell">
-    <header class="topbar">
-      <h1>Virtual Earring Studio</h1>
-      <p>Affichage camera reduit, panneaux externes, interface plus claire pour le controle et le debug.</p>
-    </header>
-
     <main class="workspace">
       <aside class="panel panel-left">
         <h2 class="panel-title">Suivi en direct</h2>
@@ -269,7 +264,7 @@
       <aside class="panel panel-right">
         <h2 class="panel-title">Controles</h2>
         <div id="controls">
-          <label><input id="mirrorPreview" type="checkbox"> Mirror preview</label>
+          <label><input id="mirrorPreview" type="checkbox" checked disabled> Mirror preview</label>
           <label><input id="showAllLandmarks" type="checkbox"> Show all 468 points</label>
           <label><input id="showEarLandmarks" type="checkbox" checked> Show ear landmarks</label>
           <label><input id="showEarrings" type="checkbox" checked> Show earrings</label>
@@ -295,6 +290,8 @@
     const chkEarLandmarks = document.getElementById('showEarLandmarks');
     const chkShowEarrings = document.getElementById('showEarrings');
     const captureBtn = document.getElementById('capture-btn');
+
+    chkMirror.checked = true;
 
     // ALL ear-related landmark indices for debugging
     const EAR_LANDMARKS = {
