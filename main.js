@@ -15,6 +15,21 @@ let scene, camera, renderer;
 let earringLeft, earringRight;
 let config = null;
 let baseEarringScale = 1;
+// ===============================
+// ROTATION PRO (GLOBAL)
+// ===============================
+let prevQuatLeft = new THREE.Quaternion();
+let prevQuatRight = new THREE.Quaternion();
+let isFirstFrame = true;
+
+// Rotation de base (corrige orientation modèle si nécessaire)
+const BASE_ROT_LEFT = new THREE.Quaternion().setFromEuler(
+  new THREE.Euler(0, 0, 0) // <-- ajuste ici si boucle mal orientée
+);
+
+const BASE_ROT_RIGHT = new THREE.Quaternion().setFromEuler(
+  new THREE.Euler(0, 0, 0)
+);
 
 // ========================================================
 // CONFIGURATION DU POINT LOBULE INTERPOLÉ
