@@ -13,6 +13,8 @@ import { RGBELoader } from 'jsm/loaders/RGBELoader.js';
 
 let scene, camera, renderer;
 let earringLeft, earringRight;
+let leftEarOccluder = null;
+let rightEarOccluder = null;
 let config = null;
 let baseEarringScale = 1;
 // ===============================
@@ -21,6 +23,18 @@ let baseEarringScale = 1;
 let prevQuatLeft = new THREE.Quaternion();
 let prevQuatRight = new THREE.Quaternion();
 let isFirstFrame = true;
+const ROTATION_SMOOTHING = 0.22;
+const DEPTH_Z_SCALE = 0.0016;
+const LANDMARK_Z_SCALE = 1.2;
+const YAW_FOLLOW = 0.65;
+const PITCH_FOLLOW = 0.12;
+const PNP_CENTER_BLEND_X = 0.75;
+const PNP_CENTER_BLEND_Y = 0.45;
+const OCCLUDER_Z_BIAS = 0.075;
+const EAR_OCCLUDE_Z_THRESHOLD = 0.055;
+const EAR_OCCLUDE_MIN_YAW = 0.38;
+const LEFT_EAR_OCCLUDER_POINTS = [234, 93, 132, 58, 172, 136, 150, 149];
+const RIGHT_EAR_OCCLUDER_POINTS = [454, 323, 361, 288, 397, 365, 379, 378];
 
 // Rotation de base (corrige orientation modèle si nécessaire)
 const BASE_ROT_LEFT = new THREE.Quaternion().setFromEuler(
@@ -107,31 +121,208 @@ const BASE_ROT = {
   RIGHT: { x: 0, y: 0, z: 0 }
 };
 
-// Smoothing for positions
-class Smoother {
-  constructor(alpha = 0.4) {
-    this.alpha = alpha;
-    this.prev = null;
+// Kalman 1D filter for stable tracking with limited lag.
+class Kalman1D {
+  constructor({ q = 0.0008, r = 0.003, p = 1 } = {}) {
+    this.q = q; // process noise
+    this.r = r; // measurement noise
+    this.p = p; // estimation error covariance
+    this.x = 0;
+    this.initialized = false;
   }
-  
-  smooth(v) {
-    if (!this.prev) {
-      this.prev = { x: v.x, y: v.y, z: v.z || 0 };
-      return this.prev;
+
+  filter(measurement) {
+    if (!this.initialized) {
+      this.x = measurement;
+      this.initialized = true;
+      return this.x;
     }
-    
-    this.prev = {
-      x: this.alpha * v.x + (1 - this.alpha) * this.prev.x,
-      y: this.alpha * v.y + (1 - this.alpha) * this.prev.y,
-      z: this.alpha * (v.z || 0) + (1 - this.alpha) * this.prev.z
-    };
-    
-    return this.prev;
+
+    // Predict
+    this.p += this.q;
+
+    // Update
+    const k = this.p / (this.p + this.r);
+    this.x += k * (measurement - this.x);
+    this.p *= (1 - k);
+
+    return this.x;
   }
 }
 
-const smoothLeft = new Smoother(1.0);
-const smoothRight = new Smoother(1.0);
+class Kalman3D {
+  constructor(cfg = {}) {
+    this.kx = new Kalman1D(cfg.x);
+    this.ky = new Kalman1D(cfg.y);
+    this.kz = new Kalman1D(cfg.z);
+  }
+
+  filter(v) {
+    return {
+      x: this.kx.filter(v.x),
+      y: this.ky.filter(v.y),
+      z: this.kz.filter(v.z || 0)
+    };
+  }
+}
+
+const kalmanLeft = new Kalman3D({
+  x: { q: 0.0032, r: 0.0018 },
+  y: { q: 0.0024, r: 0.002 },
+  z: { q: 0.0015, r: 0.01 }
+});
+
+const kalmanRight = new Kalman3D({
+  x: { q: 0.0032, r: 0.0018 },
+  y: { q: 0.0024, r: 0.002 },
+  z: { q: 0.0015, r: 0.01 }
+});
+
+function getPnPCenterNormalized(data) {
+  const tvec = data?.tvec;
+  const intr = data?.intrinsics;
+  if (!tvec || !intr) return null;
+
+  const z = tvec.z;
+  if (!Number.isFinite(z) || Math.abs(z) < 1e-6) return null;
+
+  const px = (intr.fx * (tvec.x / z)) + intr.cx;
+  const py = (intr.fy * (tvec.y / z)) + intr.cy;
+
+  return {
+    x: px / data.w,
+    y: py / data.h
+  };
+}
+
+function mapPoseDepthToSceneZ(tvecZ) {
+  const distance = Math.abs(tvecZ || 500);
+  return THREE.MathUtils.clamp((500 - distance) * DEPTH_Z_SCALE, -0.8, 0.8);
+}
+
+function createEarOccluder(pointsCount) {
+  const geometry = new THREE.BufferGeometry();
+  const positions = new Float32Array((pointsCount + 1) * 3);
+
+  const indices = [];
+  for (let i = 1; i <= pointsCount; i++) {
+    const next = i === pointsCount ? 1 : i + 1;
+    indices.push(0, i, next);
+  }
+
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+
+  const material = new THREE.MeshBasicMaterial({
+    colorWrite: false,
+    depthWrite: true,
+    depthTest: true,
+    side: THREE.DoubleSide
+  });
+
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 0;
+  return mesh;
+}
+
+function updateEarOccluder(mesh, landmarkIds, landmarks, aspect, mirrorPreview, poseDepthZ) {
+  if (!mesh || !landmarks || landmarks.length < 468) return;
+
+  const positions = mesh.geometry.attributes.position.array;
+  let cx = 0;
+  let cy = 0;
+  let cz = 0;
+
+  for (let i = 0; i < landmarkIds.length; i++) {
+    const lm = landmarks[landmarkIds[i]];
+    const x = mirrorPreview ? (1 - lm.x) : lm.x;
+    const y = lm.y;
+    const z = poseDepthZ + THREE.MathUtils.clamp((lm.z || 0) * LANDMARK_Z_SCALE, -0.35, 0.35) + OCCLUDER_Z_BIAS;
+
+    positions[(i + 1) * 3 + 0] = (x - 0.5) * 2 * aspect;
+    positions[(i + 1) * 3 + 1] = -(y - 0.5) * 2;
+    positions[(i + 1) * 3 + 2] = z;
+
+    cx += positions[(i + 1) * 3 + 0];
+    cy += positions[(i + 1) * 3 + 1];
+    cz += z;
+  }
+
+  const inv = 1 / landmarkIds.length;
+  positions[0] = cx * inv;
+  positions[1] = cy * inv;
+  positions[2] = (cz * inv) + 0.015;
+
+  mesh.geometry.attributes.position.needsUpdate = true;
+  mesh.geometry.computeVertexNormals();
+}
+
+function updateEarOccluders(landmarks, aspect, mirrorPreview, poseDepthZ) {
+  updateEarOccluder(leftEarOccluder, LEFT_EAR_OCCLUDER_POINTS, landmarks, aspect, mirrorPreview, poseDepthZ);
+  updateEarOccluder(rightEarOccluder, RIGHT_EAR_OCCLUDER_POINTS, landmarks, aspect, mirrorPreview, poseDepthZ);
+}
+
+function estimateYawFromRot9(rot9) {
+  if (!rot9 || rot9.length !== 9) return 0;
+  const rotMat = new THREE.Matrix4().set(
+    rot9[0], rot9[1], rot9[2], 0,
+    rot9[3], rot9[4], rot9[5], 0,
+    rot9[6], rot9[7], rot9[8], 0,
+    0, 0, 0, 1
+  );
+  const e = new THREE.Euler().setFromRotationMatrix(rotMat, 'YXZ');
+  return e.y;
+}
+
+function getEarVisibilityFromDepth(landmarks, yaw) {
+  if (!landmarks || landmarks.length < 468) {
+    return { left: true, right: true };
+  }
+
+  // Keep both earrings visible when face is close to frontal.
+  const yawAbs = Math.abs(yaw || 0);
+  if (yawAbs < EAR_OCCLUDE_MIN_YAW) {
+    return { left: true, right: true };
+  }
+
+  const left = landmarks[LOBULE_LANDMARKS.LEFT.LOBE_MAIN];
+  const right = landmarks[LOBULE_LANDMARKS.RIGHT.LOBE_MAIN];
+  if (!left || !right) {
+    return { left: true, right: true };
+  }
+
+  const leftZ = left.z || 0;
+  const rightZ = right.z || 0;
+  const dz = leftZ - rightZ;
+
+  if (Math.abs(dz) < EAR_OCCLUDE_Z_THRESHOLD) {
+    return { left: true, right: true };
+  }
+
+  // In MediaPipe coordinates, larger z is usually farther from camera.
+  // Use yaw sign to avoid wrong-side hiding when depth is noisy.
+  if (yaw > 0) {
+    // Face turned right on screen -> left ear tends to be farther.
+    return {
+      left: leftZ + EAR_OCCLUDE_Z_THRESHOLD <= rightZ,
+      right: true
+    };
+  }
+
+  if (yaw < 0) {
+    // Face turned left on screen -> right ear tends to be farther.
+    return {
+      left: true,
+      right: rightZ + EAR_OCCLUDE_Z_THRESHOLD <= leftZ
+    };
+  }
+
+  return {
+    left: true,
+    right: true
+  };
+}
 
 function computeTopAnchorPoint(root) {
   root.updateMatrixWorld(true);
@@ -195,6 +386,7 @@ export function initEarringTryOn(options) {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.2;
+  renderer.sortObjects = true;
   
   // Lighting
   const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -236,20 +428,24 @@ export function initEarringTryOn(options) {
       // Left earring: parent tracks landmark, child shifted so summit sits at parent origin.
       const leftModel = modelTemplate.clone(true);
       leftModel.position.set(-topAnchor.x, -topAnchor.y, -topAnchor.z);
+      leftModel.quaternion.copy(BASE_ROT_LEFT);
 
       earringLeft = new THREE.Group();
       earringLeft.add(leftModel);
       earringLeft.visible = false;
+      earringLeft.renderOrder = 1;
       scene.add(earringLeft);
       
-      // Right earring: mirror child mesh while keeping same summit anchor logic.
+      // Right earring: avoid negative scale mirroring to keep stable rotation handedness.
       const rightModel = modelTemplate.clone(true);
       rightModel.position.set(-topAnchor.x, -topAnchor.y, -topAnchor.z);
-      rightModel.scale.x *= -1;
+      rightModel.quaternion.copy(BASE_ROT_RIGHT);
+      rightModel.rotateY(Math.PI);
 
       earringRight = new THREE.Group();
       earringRight.add(rightModel);
       earringRight.visible = false;
+      earringRight.renderOrder = 1;
       scene.add(earringRight);
       
       console.log('3D earring model loaded');
@@ -257,6 +453,11 @@ export function initEarringTryOn(options) {
     undefined,
     (err) => console.error('Failed to load 3D model:', err)
   );
+
+  leftEarOccluder = createEarOccluder(LEFT_EAR_OCCLUDER_POINTS.length);
+  rightEarOccluder = createEarOccluder(RIGHT_EAR_OCCLUDER_POINTS.length);
+  scene.add(leftEarOccluder);
+  scene.add(rightEarOccluder);
   
   // Handle resize
   window.addEventListener('resize', () => {
@@ -319,10 +520,23 @@ export function updateEarringTryOn(data) {
       z: anchorRight.z || 0
     };
   }
+
+  // PnP-based global translation compensation (especially useful for fast horizontal motion).
+  const pnpCenter = getPnPCenterNormalized(data);
+  const nose = landmarks?.[1];
+  if (pnpCenter && nose) {
+    const dx = THREE.MathUtils.clamp(pnpCenter.x - nose.x, -0.08, 0.08);
+    const dy = THREE.MathUtils.clamp(pnpCenter.y - nose.y, -0.08, 0.08);
+
+    leftPos.x += dx * PNP_CENTER_BLEND_X;
+    rightPos.x += dx * PNP_CENTER_BLEND_X;
+    leftPos.y += dy * PNP_CENTER_BLEND_Y;
+    rightPos.y += dy * PNP_CENTER_BLEND_Y;
+  }
   
-  // Smooth positions
-  const smoothedLeft = smoothLeft.smooth(leftPos);
-  const smoothedRight = smoothRight.smooth(rightPos);
+  // Kalman-filtered anchor positions
+  const smoothedLeft = kalmanLeft.filter(leftPos);
+  const smoothedRight = kalmanRight.filter(rightPos);
   
   // Convert normalized coords to Three.js coords
   // In Three.js orthographic: x=[-aspect, aspect], y=[-1, 1]
@@ -335,18 +549,26 @@ export function updateEarringTryOn(data) {
     return -(ny - 0.5) * 2;
   };
   
-  // Position earrings
+  const poseDepthZ = mapPoseDepthToSceneZ(data.tvec?.z);
+  updateEarOccluders(landmarks, aspect, mirrorPreview, poseDepthZ);
+  const yaw = estimateYawFromRot9(rot9);
+  const earVisibility = getEarVisibilityFromDepth(landmarks, yaw);
+
+  const leftDepthZ = poseDepthZ + THREE.MathUtils.clamp((smoothedLeft.z || 0) * LANDMARK_Z_SCALE, -0.2, 0.2);
+  const rightDepthZ = poseDepthZ + THREE.MathUtils.clamp((smoothedRight.z || 0) * LANDMARK_Z_SCALE, -0.2, 0.2);
+
+  // Position earrings (pivot = lobule point)
   // Left ear (user's left = screen right when mirrored)
   const lx = toThreeX(smoothedLeft.x, mirrorPreview);
   const ly = toThreeY(smoothedLeft.y);
-  earringLeft.position.set(lx, ly, 0);
+  earringLeft.position.set(lx, ly, leftDepthZ);
   
   // Right ear (user's right = screen left when mirrored)
   const rx = toThreeX(smoothedRight.x, mirrorPreview);
   const ry = toThreeY(smoothedRight.y);
-  earringRight.position.set(rx, ry, 0);
+  earringRight.position.set(rx, ry, rightDepthZ);
   
-  // Apply rotation from OpenCV pose
+  // Apply head rotation while cancelling roll so earrings stay vertically hanging.
   if (rot9 && rot9.length === 9) {
     const rotMat = new THREE.Matrix4().set(
       rot9[0], rot9[1], rot9[2], 0,
@@ -354,17 +576,28 @@ export function updateEarringTryOn(data) {
       rot9[6], rot9[7], rot9[8], 0,
       0, 0, 0, 1
     );
-    
-    const euler = new THREE.Euler().setFromRotationMatrix(rotMat, 'XYZ');
-    
-    // Apply rotation with some dampening
-    earringLeft.rotation.x = euler.x * 0.2 + BASE_ROT.LEFT.x;
-    earringLeft.rotation.y = euler.y * 0.3 + BASE_ROT.LEFT.y;
-    earringLeft.rotation.z = euler.z * 0.3 + BASE_ROT.LEFT.z;
-    
-    earringRight.rotation.x = euler.x * 0.2 + BASE_ROT.RIGHT.x;
-    earringRight.rotation.y = -euler.y * 0.3 + BASE_ROT.RIGHT.y; // Mirror Y rotation
-    earringRight.rotation.z = -euler.z * 0.3 + BASE_ROT.RIGHT.z; // Mirror Z rotation
+
+    const headEuler = new THREE.Euler().setFromRotationMatrix(rotMat, 'YXZ');
+    const targetEuler = new THREE.Euler(
+      headEuler.x * PITCH_FOLLOW,
+      headEuler.y * YAW_FOLLOW,
+      0,
+      'YXZ'
+    );
+    const targetLeftQuat = new THREE.Quaternion().setFromEuler(targetEuler);
+    const targetRightQuat = new THREE.Quaternion().setFromEuler(targetEuler);
+
+    if (isFirstFrame) {
+      prevQuatLeft.copy(targetLeftQuat);
+      prevQuatRight.copy(targetRightQuat);
+      isFirstFrame = false;
+    } else {
+      prevQuatLeft.slerp(targetLeftQuat, ROTATION_SMOOTHING);
+      prevQuatRight.slerp(targetRightQuat, ROTATION_SMOOTHING);
+    }
+
+    earringLeft.quaternion.copy(prevQuatLeft);
+    earringRight.quaternion.copy(prevQuatRight);
   }
   
   // Scale based on distance
@@ -376,9 +609,9 @@ export function updateEarringTryOn(data) {
   earringLeft.scale.setScalar(currentScale);
   earringRight.scale.setScalar(currentScale);
   
-  // Make visible
-  earringLeft.visible = true;
-  earringRight.visible = true;
+  // Make visible (hide far ear when head rotation makes it go behind face)
+  earringLeft.visible = earVisibility.left;
+  earringRight.visible = earVisibility.right;
   
   // Render
   renderer.render(scene, camera);
