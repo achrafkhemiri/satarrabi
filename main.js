@@ -1,6 +1,10 @@
 /**
  * main.js - Earring Try-On with Three.js
  * Uses OpenCV solvePnP for precise 3D pose estimation
+ * 
+ * POINT LOBULE INTERPOLÉ:
+ * Le point exact du lobule est calculé à partir de plusieurs landmarks
+ * et peut être ajusté manuellement via les sliders dans l'interface.
  */
 
 import * as THREE from 'three';
@@ -12,11 +16,75 @@ let earringLeft, earringRight;
 let config = null;
 let baseEarringScale = 1;
 
-// Position offsets for ear lobes (tweak these for perfect placement)
-const OFFSETS = {
-  LEFT: { x: 0.0, y: 0.0 },   // Exact anchor on #132
-  RIGHT: { x: 0.0, y: 0.0 }   // Exact anchor on #361
+// ========================================================
+// CONFIGURATION DU POINT LOBULE INTERPOLÉ
+// ========================================================
+
+// Offsets ajustables depuis l'interface (modifié en temps réel par les sliders)
+// X négatif = vers l'extérieur (oreille), X positif = vers l'intérieur (visage)
+// Y négatif = vers le haut, Y positif = vers le bas
+// VALEURS CALIBRÉES - Position centre du lobule
+let LOBULE_OFFSET = { x: 0.018, y: -0.046 };
+
+// Fonction exportée pour mise à jour depuis l'interface
+export function setLobuleOffsets(x, y) {
+  LOBULE_OFFSET.x = x;
+  LOBULE_OFFSET.y = y;
+}
+
+// Landmarks utilisés pour interpoler le point lobule
+// Left: #132 (lobe principal), #172 (lobe bas), #147 (mâchoire)
+// Right: #361 (lobe principal), #397 (lobe bas), #376 (mâchoire)
+const LOBULE_LANDMARKS = {
+  LEFT: {
+    LOBE_MAIN: 132,    // Point principal du lobe
+    LOBE_LOWER: 172,   // Point plus bas
+    JAW: 147,          // Mâchoire (référence verticale)
+    EAR_TOP: 234       // Haut de l'oreille (pour calculer l'échelle)
+  },
+  RIGHT: {
+    LOBE_MAIN: 361,    // Point principal du lobe
+    LOBE_LOWER: 397,   // Point plus bas
+    JAW: 376,          // Mâchoire (référence verticale)
+    EAR_TOP: 454       // Haut de l'oreille (pour calculer l'échelle)
+  }
 };
+
+/**
+ * Calcule le point lobule interpolé pour un côté donné
+ * @param {Array} landmarks - Tous les landmarks du visage
+ * @param {string} side - 'LEFT' ou 'RIGHT'
+ * @returns {Object} - Position interpolée {x, y, z}
+ */
+function calculateInterpolatedLobule(landmarks, side) {
+  const cfg = LOBULE_LANDMARKS[side];
+  
+  const lobeMain = landmarks[cfg.LOBE_MAIN];
+  const lobeLower = landmarks[cfg.LOBE_LOWER];
+  const jaw = landmarks[cfg.JAW];
+  const earTop = landmarks[cfg.EAR_TOP];
+  
+  if (!lobeMain || !lobeLower) {
+    return lobeMain || { x: 0.5, y: 0.5, z: 0 };
+  }
+  
+  // Interpolation: moyenne pondérée entre lobe principal (70%) et lobe bas (30%)
+  // Cela place le point plus au centre du lobule
+  const baseX = lobeMain.x * 0.7 + lobeLower.x * 0.3;
+  const baseY = lobeMain.y * 0.7 + lobeLower.y * 0.3;
+  const baseZ = (lobeMain.z || 0) * 0.7 + (lobeLower.z || 0) * 0.3;
+  
+  // Appliquer les offsets manuels
+  // Note: pour le côté gauche, X négatif va vers l'extérieur (valeur X plus petite)
+  // Pour le côté droit, X négatif va vers l'extérieur (valeur X plus grande car image miroir)
+  const xDirection = side === 'LEFT' ? -1 : 1;
+  
+  return {
+    x: baseX + (LOBULE_OFFSET.x * xDirection),
+    y: baseY + LOBULE_OFFSET.y,
+    z: baseZ
+  };
+}
 
 // Base local orientation so earrings hang down instead of lying horizontal.
 const BASE_ROT = {
@@ -207,22 +275,35 @@ export function updateEarringTryOn(data) {
   const { landmarks, earLobes, rot9, w, h, mirrorPreview } = data;
   const aspect = w / h;
 
-  // Hard-lock anchors to FaceMesh points #132 (left) and #361 (right).
-  const anchorLeft = landmarks?.[132] || earLobes.left;
-  const anchorRight = landmarks?.[361] || earLobes.right;
+  // ========================================================
+  // POINT LOBULE INTERPOLÉ
+  // Utilise plusieurs landmarks pour un positionnement précis
+  // + offsets ajustables depuis l'interface
+  // ========================================================
   
-  // Apply offsets to ear lobe positions
-  const leftPos = {
-    x: anchorLeft.x + OFFSETS.LEFT.x,
-    y: anchorLeft.y + OFFSETS.LEFT.y,
-    z: anchorLeft.z || 0
-  };
+  let leftPos, rightPos;
   
-  const rightPos = {
-    x: anchorRight.x + OFFSETS.RIGHT.x,
-    y: anchorRight.y + OFFSETS.RIGHT.y,
-    z: anchorRight.z || 0
-  };
+  if (landmarks && landmarks.length >= 468) {
+    // Utiliser le point lobule interpolé
+    leftPos = calculateInterpolatedLobule(landmarks, 'LEFT');
+    rightPos = calculateInterpolatedLobule(landmarks, 'RIGHT');
+  } else {
+    // Fallback sur les positions brutes
+    const anchorLeft = landmarks?.[132] || earLobes.left;
+    const anchorRight = landmarks?.[361] || earLobes.right;
+    
+    leftPos = {
+      x: anchorLeft.x + LOBULE_OFFSET.x * -1,
+      y: anchorLeft.y + LOBULE_OFFSET.y,
+      z: anchorLeft.z || 0
+    };
+    
+    rightPos = {
+      x: anchorRight.x + LOBULE_OFFSET.x * 1,
+      y: anchorRight.y + LOBULE_OFFSET.y,
+      z: anchorRight.z || 0
+    };
+  }
   
   // Smooth positions
   const smoothedLeft = smoothLeft.smooth(leftPos);
