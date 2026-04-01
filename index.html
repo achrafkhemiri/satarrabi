@@ -151,15 +151,15 @@
 
     #info {
       margin: 0;
-      min-height: 270px;
-      padding: 14px;
+      min-height: 230px;
+      padding: 12px;
       border-radius: 12px;
       border: 1px solid rgba(52, 209, 191, 0.35);
       background: rgba(0, 0, 0, 0.24);
       white-space: pre-wrap;
       color: #abffd5;
       font: 12.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      line-height: 1.45;
+      line-height: 1.32;
     }
 
     #controls {
@@ -239,7 +239,7 @@
       }
 
       #info {
-        min-height: 220px;
+        min-height: 200px;
       }
     }
   </style>
@@ -250,6 +250,36 @@
       <aside class="panel panel-left">
         <h2 class="panel-title">Suivi en direct</h2>
         <div id="info">Loading OpenCV...</div>
+
+        <h2 class="panel-title" style="margin-top: 14px;">Translation 3D</h2>
+        <div id="translation-controls" style="padding: 12px; border: 1px solid rgba(149, 205, 255, 0.35); border-radius: 12px; background: rgba(0,0,0,0.24); margin-top: 8px;">
+          <div style="margin-bottom: 10px;">
+            <label style="display: block; font-size: 0.85rem; color: var(--text-soft); margin-bottom: 4px;">
+              Translation X: <span id="translationXValue">0.000</span>
+            </label>
+            <input type="range" id="translationX" min="-0.25" max="0.25" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
+          </div>
+          <div style="margin-bottom: 10px;">
+            <label style="display: block; font-size: 0.85rem; color: var(--text-soft); margin-bottom: 4px;">
+              Translation Y: <span id="translationYValue">0.000</span>
+            </label>
+            <input type="range" id="translationY" min="-0.25" max="0.25" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
+          </div>
+          <div style="margin-bottom: 10px;">
+            <label style="display: block; font-size: 0.85rem; color: var(--text-soft); margin-bottom: 4px;">
+              Translation Z: <span id="translationZValue">0.000</span>
+            </label>
+            <input type="range" id="translationZ" min="-0.35" max="0.35" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button id="resetTranslation" style="flex: 1; padding: 8px; border: 1px solid var(--stroke); border-radius: 8px; background: rgba(255,255,255,0.08); color: var(--text); cursor: pointer; font-size: 0.85rem;">Reset</button>
+            <button id="copyTranslation" style="flex: 1; padding: 8px; border: 1px solid #8bd4ff; border-radius: 8px; background: rgba(139, 212, 255, 0.14); color: #8bd4ff; cursor: pointer; font-size: 0.85rem;">Copy Values</button>
+          </div>
+          <div style="margin-top: 8px; font-size: 0.78rem; color: var(--text-soft);">
+            <strong>Valeurs actuelles:</strong><br>
+            <code id="currentTranslation" style="color: #8bd4ff;">X: 0.000, Y: 0.000, Z: 0.000</code>
+          </div>
+        </div>
       </aside>
 
       <section class="viewer-wrap">
@@ -327,7 +357,7 @@
   </div>
 
   <script type="module">
-    import { initEarringTryOn, updateEarringTryOn, setLobuleOffsets, setEarringScaleMultiplier } from './main.js';
+    import { initEarringTryOn, updateEarringTryOn, setLobuleOffsets, setEarringScaleMultiplier, setEarringTranslation } from './main.js';
     import { GLTFLoader } from 'jsm/loaders/GLTFLoader.js';
 
     const video = document.getElementById('video');
@@ -508,6 +538,15 @@
     const currentOffsets = document.getElementById('currentOffsets');
     const resetOffsets = document.getElementById('resetOffsets');
     const copyOffsets = document.getElementById('copyOffsets');
+    const translationX = document.getElementById('translationX');
+    const translationY = document.getElementById('translationY');
+    const translationZ = document.getElementById('translationZ');
+    const translationXValue = document.getElementById('translationXValue');
+    const translationYValue = document.getElementById('translationYValue');
+    const translationZValue = document.getElementById('translationZValue');
+    const currentTranslation = document.getElementById('currentTranslation');
+    const resetTranslation = document.getElementById('resetTranslation');
+    const copyTranslation = document.getElementById('copyTranslation');
 
     // Global lobule offsets (exposed for main.js) - VALEURS CALIBRÉES
     window.LOBULE_OFFSETS = { x: 0.022, y: -0.046 };
@@ -543,6 +582,43 @@
         setTimeout(() => { copyOffsets.textContent = 'Copy Values'; }, 1500);
       });
     });
+
+    function updateTranslationDisplay() {
+      const x = parseFloat(translationX.value);
+      const y = parseFloat(translationY.value);
+      const z = parseFloat(translationZ.value);
+      translationXValue.textContent = x.toFixed(3);
+      translationYValue.textContent = y.toFixed(3);
+      translationZValue.textContent = z.toFixed(3);
+      currentTranslation.textContent = `X: ${x.toFixed(3)}, Y: ${y.toFixed(3)}, Z: ${z.toFixed(3)}`;
+      if (typeof setEarringTranslation === 'function') {
+        setEarringTranslation(x, y, z);
+      }
+    }
+
+    translationX.addEventListener('input', updateTranslationDisplay);
+    translationY.addEventListener('input', updateTranslationDisplay);
+    translationZ.addEventListener('input', updateTranslationDisplay);
+
+    resetTranslation.addEventListener('click', () => {
+      translationX.value = 0;
+      translationY.value = 0;
+      translationZ.value = 0;
+      updateTranslationDisplay();
+    });
+
+    copyTranslation.addEventListener('click', () => {
+      const x = parseFloat(translationX.value);
+      const y = parseFloat(translationY.value);
+      const z = parseFloat(translationZ.value);
+      const text = `EARRING_TRANSLATION = { x: ${x.toFixed(3)}, y: ${y.toFixed(3)}, z: ${z.toFixed(3)} }`;
+      navigator.clipboard.writeText(text).then(() => {
+        copyTranslation.textContent = 'Copied!';
+        setTimeout(() => { copyTranslation.textContent = 'Copy Values'; }, 1500);
+      });
+    });
+
+    updateTranslationDisplay();
 
     chkMirror.checked = true;
 
@@ -984,7 +1060,6 @@
           });
 
           // Update info panel avec point interpolé
-          const offsets = window.LOBULE_OFFSETS || { x: 0, y: 0 };
           if ((infoFrameCounter++ % 6) === 0) {
             info.textContent = `✓ Face detected
 Distance: ${zcm} cm
@@ -992,13 +1067,9 @@ Distance: ${zcm} cm
 Ear Points (CYAN):
   L: #132 (${leftLobeA?.x.toFixed(3)}, ${leftLobeA?.y.toFixed(3)})
   R: #361 (${rightLobeA?.x.toFixed(3)}, ${rightLobeA?.y.toFixed(3)})
-
 Point Interpolé (avec offsets):
   L: (${leftInterpolated?.x.toFixed(3)}, ${leftInterpolated?.y.toFixed(3)})
   R: (${rightInterpolated?.x.toFixed(3)}, ${rightInterpolated?.y.toFixed(3)})
-
-Offsets: X=${offsets.x.toFixed(3)}, Y=${offsets.y.toFixed(3)}
-
 Rotation:
   Yaw: ${(rvec.data64F[1] * 180/Math.PI).toFixed(1)}°
   Pitch: ${(rvec.data64F[0] * 180/Math.PI).toFixed(1)}°

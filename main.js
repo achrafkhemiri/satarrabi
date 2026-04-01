@@ -18,6 +18,7 @@ let rightEarOccluder = null;
 let config = null;
 let baseEarringScale = 1;
 let userScaleMultiplier = 1;
+let userTranslation = { x: 0, y: 0, z: 0 };
 let smoothedDist = 500;
 
 // ===============================
@@ -40,10 +41,11 @@ const EAR_OCCLUDE_MIN_YAW = 0.24;
 const EAR_HIDE_HYST_ON = 0.62;
 const EAR_HIDE_HYST_OFF = 0.34;
 const EAR_HIDE_SMOOTH = 0.28;
+const TRANSLATION_Z_SCALE_GAIN = 1.25;
 
 const LEFT_EAR_OCCLUDER_POINTS = [234, 93, 132, 58, 172, 136, 150, 149];
 const RIGHT_EAR_OCCLUDER_POINTS = [454, 323, 361, 288, 397, 365, 379, 378];
-const ENABLE_EAR_OCCLUDERS = true;
+const ENABLE_EAR_OCCLUDERS = false;
 const USE_DEPTH_VISIBILITY = true;
 
 let leftHiddenScore = 0;
@@ -74,6 +76,12 @@ export function setEarringScaleMultiplier(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return;
   userScaleMultiplier = THREE.MathUtils.clamp(n, 0.02, 2.0);
+}
+
+export function setEarringTranslation(x, y, z = 0) {
+  userTranslation.x = THREE.MathUtils.clamp(Number(x) || 0, -0.5, 0.5);
+  userTranslation.y = THREE.MathUtils.clamp(Number(y) || 0, -0.5, 0.5);
+  userTranslation.z = THREE.MathUtils.clamp(Number(z) || 0, -0.8, 0.8);
 }
 
 const LOBULE_LANDMARKS = {
@@ -571,12 +579,20 @@ export function updateEarringTryOn(data) {
   const left2d = mapLandmarkToScene(smoothedLeft, mirrorPreview, cover, sceneAspect);
   const lx = left2d.x;
   const ly = left2d.y;
-  earringLeft.position.set(lx, ly, leftDepthZ);
+  earringLeft.position.set(
+    lx + userTranslation.x,
+    ly + userTranslation.y,
+    leftDepthZ + userTranslation.z
+  );
 
   const right2d = mapLandmarkToScene(smoothedRight, mirrorPreview, cover, sceneAspect);
   const rx = right2d.x;
   const ry = right2d.y;
-  earringRight.position.set(rx, ry, rightDepthZ);
+  earringRight.position.set(
+    rx + userTranslation.x,
+    ry + userTranslation.y,
+    rightDepthZ + userTranslation.z
+  );
 
   if (rot9 && rot9.length === 9) {
     const rotMat = new THREE.Matrix4().set(
@@ -613,7 +629,10 @@ export function updateEarringTryOn(data) {
   smoothedDist = THREE.MathUtils.lerp(smoothedDist, rawDist, 0.25);
   const scaleFactor = Math.max(0.9, Math.min(2.6, 460 / Math.max(120, smoothedDist)));
   const baseScale = baseEarringScale || Math.abs(earringLeft.scale.x) || 0.01;
-  const currentScale = baseScale * scaleFactor * userScaleMultiplier;
+  // In orthographic projection, Z translation alone is barely visible.
+  // Couple Z with scale to create a perceptible depth effect.
+  const zScaleFactor = THREE.MathUtils.clamp(1 + (userTranslation.z * TRANSLATION_Z_SCALE_GAIN), 0.45, 2.2);
+  const currentScale = baseScale * scaleFactor * userScaleMultiplier * zScaleFactor;
 
   earringLeft.scale.setScalar(currentScale);
   earringRight.scale.setScalar(currentScale);
