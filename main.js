@@ -13,28 +13,27 @@ import { RGBELoader } from 'jsm/loaders/RGBELoader.js';
 
 let scene, camera, renderer;
 let earringLeft, earringRight;
-let leftEarOccluder = null;
-let rightEarOccluder = null;
 let config = null;
 let baseEarringScale = 1;
+let userScaleMultiplier = 1;
 // ===============================
 // ROTATION PRO (GLOBAL)
 // ===============================
 let prevQuatLeft = new THREE.Quaternion();
 let prevQuatRight = new THREE.Quaternion();
 let isFirstFrame = true;
-const ROTATION_SMOOTHING = 0.22;
-const DEPTH_Z_SCALE = 0.0016;
-const LANDMARK_Z_SCALE = 1.2;
+let smoothedDist = 500;
+const ROTATION_SMOOTHING = 0.38;
 const YAW_FOLLOW = 0.65;
 const PITCH_FOLLOW = 0.12;
-const PNP_CENTER_BLEND_X = 0.75;
-const PNP_CENTER_BLEND_Y = 0.45;
-const OCCLUDER_Z_BIAS = 0.075;
-const EAR_OCCLUDE_Z_THRESHOLD = 0.055;
-const EAR_OCCLUDE_MIN_YAW = 0.38;
-const LEFT_EAR_OCCLUDER_POINTS = [234, 93, 132, 58, 172, 136, 150, 149];
-const RIGHT_EAR_OCCLUDER_POINTS = [454, 323, 361, 288, 397, 365, 379, 378];
+const YAW_HIDE_SOFT = 0.24;
+const YAW_HIDE_HARD = 0.62;
+const EAR_HIDE_Z_MARGIN = 0.010;
+
+let leftHiddenScore = 0;
+let rightHiddenScore = 0;
+let leftVisibleState = true;
+let rightVisibleState = true;
 
 // Rotation de base (corrige orientation modèle si nécessaire)
 const BASE_ROT_LEFT = new THREE.Quaternion().setFromEuler(
@@ -53,12 +52,18 @@ const BASE_ROT_RIGHT = new THREE.Quaternion().setFromEuler(
 // X négatif = vers l'extérieur (oreille), X positif = vers l'intérieur (visage)
 // Y négatif = vers le haut, Y positif = vers le bas
 // VALEURS CALIBRÉES - Position centre du lobule
-let LOBULE_OFFSET = { x: 0.018, y: -0.046 };
+let LOBULE_OFFSET = { x: 0.022, y: -0.046 };
 
 // Fonction exportée pour mise à jour depuis l'interface
 export function setLobuleOffsets(x, y) {
   LOBULE_OFFSET.x = x;
   LOBULE_OFFSET.y = y;
+}
+
+export function setEarringScaleMultiplier(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return;
+  userScaleMultiplier = THREE.MathUtils.clamp(n, 0.02, 2.0);
 }
 
 // Landmarks utilisés pour interpoler le point lobule
@@ -121,147 +126,28 @@ const BASE_ROT = {
   RIGHT: { x: 0, y: 0, z: 0 }
 };
 
-// Kalman 1D filter for stable tracking with limited lag.
-class Kalman1D {
-  constructor({ q = 0.0008, r = 0.003, p = 1 } = {}) {
-    this.q = q; // process noise
-    this.r = r; // measurement noise
-    this.p = p; // estimation error covariance
-    this.x = 0;
-    this.initialized = false;
+class Smoother {
+  constructor(alpha = 0.85) {
+    this.alpha = alpha;
+    this.prev = null;
   }
 
-  filter(measurement) {
-    if (!this.initialized) {
-      this.x = measurement;
-      this.initialized = true;
-      return this.x;
+  smooth(v) {
+    if (!this.prev) {
+      this.prev = { x: v.x, y: v.y, z: v.z || 0 };
+      return this.prev;
     }
-
-    // Predict
-    this.p += this.q;
-
-    // Update
-    const k = this.p / (this.p + this.r);
-    this.x += k * (measurement - this.x);
-    this.p *= (1 - k);
-
-    return this.x;
-  }
-}
-
-class Kalman3D {
-  constructor(cfg = {}) {
-    this.kx = new Kalman1D(cfg.x);
-    this.ky = new Kalman1D(cfg.y);
-    this.kz = new Kalman1D(cfg.z);
-  }
-
-  filter(v) {
-    return {
-      x: this.kx.filter(v.x),
-      y: this.ky.filter(v.y),
-      z: this.kz.filter(v.z || 0)
+    this.prev = {
+      x: this.alpha * v.x + (1 - this.alpha) * this.prev.x,
+      y: this.alpha * v.y + (1 - this.alpha) * this.prev.y,
+      z: this.alpha * (v.z || 0) + (1 - this.alpha) * this.prev.z
     };
+    return this.prev;
   }
 }
 
-const kalmanLeft = new Kalman3D({
-  x: { q: 0.0032, r: 0.0018 },
-  y: { q: 0.0024, r: 0.002 },
-  z: { q: 0.0015, r: 0.01 }
-});
-
-const kalmanRight = new Kalman3D({
-  x: { q: 0.0032, r: 0.0018 },
-  y: { q: 0.0024, r: 0.002 },
-  z: { q: 0.0015, r: 0.01 }
-});
-
-function getPnPCenterNormalized(data) {
-  const tvec = data?.tvec;
-  const intr = data?.intrinsics;
-  if (!tvec || !intr) return null;
-
-  const z = tvec.z;
-  if (!Number.isFinite(z) || Math.abs(z) < 1e-6) return null;
-
-  const px = (intr.fx * (tvec.x / z)) + intr.cx;
-  const py = (intr.fy * (tvec.y / z)) + intr.cy;
-
-  return {
-    x: px / data.w,
-    y: py / data.h
-  };
-}
-
-function mapPoseDepthToSceneZ(tvecZ) {
-  const distance = Math.abs(tvecZ || 500);
-  return THREE.MathUtils.clamp((500 - distance) * DEPTH_Z_SCALE, -0.8, 0.8);
-}
-
-function createEarOccluder(pointsCount) {
-  const geometry = new THREE.BufferGeometry();
-  const positions = new Float32Array((pointsCount + 1) * 3);
-
-  const indices = [];
-  for (let i = 1; i <= pointsCount; i++) {
-    const next = i === pointsCount ? 1 : i + 1;
-    indices.push(0, i, next);
-  }
-
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setIndex(indices);
-
-  const material = new THREE.MeshBasicMaterial({
-    colorWrite: false,
-    depthWrite: true,
-    depthTest: true,
-    side: THREE.DoubleSide
-  });
-
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.frustumCulled = false;
-  mesh.renderOrder = 0;
-  return mesh;
-}
-
-function updateEarOccluder(mesh, landmarkIds, landmarks, aspect, mirrorPreview, poseDepthZ) {
-  if (!mesh || !landmarks || landmarks.length < 468) return;
-
-  const positions = mesh.geometry.attributes.position.array;
-  let cx = 0;
-  let cy = 0;
-  let cz = 0;
-
-  for (let i = 0; i < landmarkIds.length; i++) {
-    const lm = landmarks[landmarkIds[i]];
-    const x = mirrorPreview ? (1 - lm.x) : lm.x;
-    const y = lm.y;
-    const z = poseDepthZ + THREE.MathUtils.clamp((lm.z || 0) * LANDMARK_Z_SCALE, -0.35, 0.35) + OCCLUDER_Z_BIAS;
-
-    positions[(i + 1) * 3 + 0] = (x - 0.5) * 2 * aspect;
-    positions[(i + 1) * 3 + 1] = -(y - 0.5) * 2;
-    positions[(i + 1) * 3 + 2] = z;
-
-    cx += positions[(i + 1) * 3 + 0];
-    cy += positions[(i + 1) * 3 + 1];
-    cz += z;
-  }
-
-  const inv = 1 / landmarkIds.length;
-  positions[0] = cx * inv;
-  positions[1] = cy * inv;
-  positions[2] = (cz * inv) + 0.015;
-
-  mesh.geometry.attributes.position.needsUpdate = true;
-  mesh.geometry.computeVertexNormals();
-}
-
-function updateEarOccluders(landmarks, aspect, mirrorPreview, poseDepthZ) {
-  updateEarOccluder(leftEarOccluder, LEFT_EAR_OCCLUDER_POINTS, landmarks, aspect, mirrorPreview, poseDepthZ);
-  updateEarOccluder(rightEarOccluder, RIGHT_EAR_OCCLUDER_POINTS, landmarks, aspect, mirrorPreview, poseDepthZ);
-}
+const smoothLeft = new Smoother(0.85);
+const smoothRight = new Smoother(0.85);
 
 function estimateYawFromRot9(rot9) {
   if (!rot9 || rot9.length !== 9) return 0;
@@ -275,53 +161,43 @@ function estimateYawFromRot9(rot9) {
   return e.y;
 }
 
-function getEarVisibilityFromDepth(landmarks, yaw) {
+function getEarVisibility(landmarks, yaw) {
+  const y = yaw || 0;
+
+  // Hard fallback only by yaw when landmarks are missing.
   if (!landmarks || landmarks.length < 468) {
-    return { left: true, right: true };
+    if (Math.abs(y) < YAW_HIDE_HARD) return { left: true, right: true };
+    return y > 0 ? { left: false, right: true } : { left: true, right: false };
   }
 
-  // Keep both earrings visible when face is close to frontal.
-  const yawAbs = Math.abs(yaw || 0);
-  if (yawAbs < EAR_OCCLUDE_MIN_YAW) {
-    return { left: true, right: true };
+  const leftEar = landmarks[LOBULE_LANDMARKS.LEFT.LOBE_MAIN];
+  const rightEar = landmarks[LOBULE_LANDMARKS.RIGHT.LOBE_MAIN];
+  if (!leftEar || !rightEar) {
+    if (Math.abs(y) < YAW_HIDE_HARD) return { left: true, right: true };
+    return y > 0 ? { left: false, right: true } : { left: true, right: false };
   }
 
-  const left = landmarks[LOBULE_LANDMARKS.LEFT.LOBE_MAIN];
-  const right = landmarks[LOBULE_LANDMARKS.RIGHT.LOBE_MAIN];
-  if (!left || !right) {
-    return { left: true, right: true };
-  }
+  // MediaPipe z: larger usually means farther from camera.
+  const dz = (leftEar.z || 0) - (rightEar.z || 0);
+  const leftHiddenHard = y > YAW_HIDE_HARD;
+  const rightHiddenHard = y < -YAW_HIDE_HARD;
+  const leftHiddenSoft = y > YAW_HIDE_SOFT && dz > EAR_HIDE_Z_MARGIN;
+  const rightHiddenSoft = y < -YAW_HIDE_SOFT && -dz > EAR_HIDE_Z_MARGIN;
 
-  const leftZ = left.z || 0;
-  const rightZ = right.z || 0;
-  const dz = leftZ - rightZ;
+  const leftTarget = (leftHiddenHard || leftHiddenSoft) ? 1 : 0;
+  const rightTarget = (rightHiddenHard || rightHiddenSoft) ? 1 : 0;
 
-  if (Math.abs(dz) < EAR_OCCLUDE_Z_THRESHOLD) {
-    return { left: true, right: true };
-  }
+  leftHiddenScore = THREE.MathUtils.lerp(leftHiddenScore, leftTarget, 0.35);
+  rightHiddenScore = THREE.MathUtils.lerp(rightHiddenScore, rightTarget, 0.35);
 
-  // In MediaPipe coordinates, larger z is usually farther from camera.
-  // Use yaw sign to avoid wrong-side hiding when depth is noisy.
-  if (yaw > 0) {
-    // Face turned right on screen -> left ear tends to be farther.
-    return {
-      left: leftZ + EAR_OCCLUDE_Z_THRESHOLD <= rightZ,
-      right: true
-    };
-  }
+  // Hysteresis to avoid flicker around threshold.
+  if (leftVisibleState && leftHiddenScore > 0.58) leftVisibleState = false;
+  else if (!leftVisibleState && leftHiddenScore < 0.32) leftVisibleState = true;
 
-  if (yaw < 0) {
-    // Face turned left on screen -> right ear tends to be farther.
-    return {
-      left: true,
-      right: rightZ + EAR_OCCLUDE_Z_THRESHOLD <= leftZ
-    };
-  }
+  if (rightVisibleState && rightHiddenScore > 0.58) rightVisibleState = false;
+  else if (!rightVisibleState && rightHiddenScore < 0.32) rightVisibleState = true;
 
-  return {
-    left: true,
-    right: true
-  };
+  return { left: leftVisibleState, right: rightVisibleState };
 }
 
 function computeTopAnchorPoint(root) {
@@ -378,10 +254,10 @@ export function initEarringTryOn(options) {
   renderer = new THREE.WebGLRenderer({
     canvas,
     alpha: true,
-    antialias: true,
+    antialias: false,
     preserveDrawingBuffer: true
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(1);
   renderer.setSize(canvas.width, canvas.height, false);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -454,11 +330,6 @@ export function initEarringTryOn(options) {
     (err) => console.error('Failed to load 3D model:', err)
   );
 
-  leftEarOccluder = createEarOccluder(LEFT_EAR_OCCLUDER_POINTS.length);
-  rightEarOccluder = createEarOccluder(RIGHT_EAR_OCCLUDER_POINTS.length);
-  scene.add(leftEarOccluder);
-  scene.add(rightEarOccluder);
-  
   // Handle resize
   window.addEventListener('resize', () => {
     const w = canvas.clientWidth;
@@ -521,22 +392,8 @@ export function updateEarringTryOn(data) {
     };
   }
 
-  // PnP-based global translation compensation (especially useful for fast horizontal motion).
-  const pnpCenter = getPnPCenterNormalized(data);
-  const nose = landmarks?.[1];
-  if (pnpCenter && nose) {
-    const dx = THREE.MathUtils.clamp(pnpCenter.x - nose.x, -0.08, 0.08);
-    const dy = THREE.MathUtils.clamp(pnpCenter.y - nose.y, -0.08, 0.08);
-
-    leftPos.x += dx * PNP_CENTER_BLEND_X;
-    rightPos.x += dx * PNP_CENTER_BLEND_X;
-    leftPos.y += dy * PNP_CENTER_BLEND_Y;
-    rightPos.y += dy * PNP_CENTER_BLEND_Y;
-  }
-  
-  // Kalman-filtered anchor positions
-  const smoothedLeft = kalmanLeft.filter(leftPos);
-  const smoothedRight = kalmanRight.filter(rightPos);
+  const smoothedLeft = smoothLeft.smooth(leftPos);
+  const smoothedRight = smoothRight.smooth(rightPos);
   
   // Convert normalized coords to Three.js coords
   // In Three.js orthographic: x=[-aspect, aspect], y=[-1, 1]
@@ -549,24 +406,19 @@ export function updateEarringTryOn(data) {
     return -(ny - 0.5) * 2;
   };
   
-  const poseDepthZ = mapPoseDepthToSceneZ(data.tvec?.z);
-  updateEarOccluders(landmarks, aspect, mirrorPreview, poseDepthZ);
   const yaw = estimateYawFromRot9(rot9);
-  const earVisibility = getEarVisibilityFromDepth(landmarks, yaw);
-
-  const leftDepthZ = poseDepthZ + THREE.MathUtils.clamp((smoothedLeft.z || 0) * LANDMARK_Z_SCALE, -0.2, 0.2);
-  const rightDepthZ = poseDepthZ + THREE.MathUtils.clamp((smoothedRight.z || 0) * LANDMARK_Z_SCALE, -0.2, 0.2);
+  const earVisibility = getEarVisibility(landmarks, yaw);
 
   // Position earrings (pivot = lobule point)
   // Left ear (user's left = screen right when mirrored)
   const lx = toThreeX(smoothedLeft.x, mirrorPreview);
   const ly = toThreeY(smoothedLeft.y);
-  earringLeft.position.set(lx, ly, leftDepthZ);
+  earringLeft.position.set(lx, ly, 0);
   
   // Right ear (user's right = screen left when mirrored)
   const rx = toThreeX(smoothedRight.x, mirrorPreview);
   const ry = toThreeY(smoothedRight.y);
-  earringRight.position.set(rx, ry, rightDepthZ);
+  earringRight.position.set(rx, ry, 0);
   
   // Apply head rotation while cancelling roll so earrings stay vertically hanging.
   if (rot9 && rot9.length === 9) {
@@ -587,24 +439,32 @@ export function updateEarringTryOn(data) {
     const targetLeftQuat = new THREE.Quaternion().setFromEuler(targetEuler);
     const targetRightQuat = new THREE.Quaternion().setFromEuler(targetEuler);
 
+    const angularDelta = isFirstFrame ? 0 : prevQuatLeft.angleTo(targetLeftQuat);
+    const adaptiveSmoothing = THREE.MathUtils.clamp(
+      ROTATION_SMOOTHING + angularDelta * 1.1,
+      0.30,
+      0.75
+    );
+
     if (isFirstFrame) {
       prevQuatLeft.copy(targetLeftQuat);
       prevQuatRight.copy(targetRightQuat);
       isFirstFrame = false;
     } else {
-      prevQuatLeft.slerp(targetLeftQuat, ROTATION_SMOOTHING);
-      prevQuatRight.slerp(targetRightQuat, ROTATION_SMOOTHING);
+      prevQuatLeft.slerp(targetLeftQuat, adaptiveSmoothing);
+      prevQuatRight.slerp(targetRightQuat, adaptiveSmoothing);
     }
 
     earringLeft.quaternion.copy(prevQuatLeft);
     earringRight.quaternion.copy(prevQuatRight);
   }
   
-  // Scale based on distance
-  const dist = data.tvec?.z || 500;
-  const scaleFactor = Math.max(0.9, Math.min(2.6, 460 / Math.abs(dist)));
+  // Smooth distance to prevent sudden size jumps when solvePnP jitters during motion.
+  const rawDist = Math.abs(data.tvec?.z || 500);
+  smoothedDist = THREE.MathUtils.lerp(smoothedDist, rawDist, 0.25);
+  const scaleFactor = Math.max(0.9, Math.min(2.0, 460 / Math.max(120, smoothedDist)));
   const baseScale = baseEarringScale || Math.abs(earringLeft.scale.x) || 0.01;
-  const currentScale = baseScale * scaleFactor;
+  const currentScale = baseScale * scaleFactor * userScaleMultiplier;
   
   earringLeft.scale.setScalar(currentScale);
   earringRight.scale.setScalar(currentScale);
