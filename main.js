@@ -35,11 +35,21 @@ const PITCH_FOLLOW = 0.12;
 const PNP_CENTER_BLEND_X = 0.75;
 const PNP_CENTER_BLEND_Y = 0.45;
 const OCCLUDER_Z_BIAS = 0.075;
-const EAR_OCCLUDE_Z_THRESHOLD = 0.055;
-const EAR_OCCLUDE_MIN_YAW = 0.38;
+const EAR_OCCLUDE_Z_THRESHOLD = 0.04;
+const EAR_OCCLUDE_MIN_YAW = 0.24;
+const EAR_HIDE_HYST_ON = 0.62;
+const EAR_HIDE_HYST_OFF = 0.34;
+const EAR_HIDE_SMOOTH = 0.28;
 
 const LEFT_EAR_OCCLUDER_POINTS = [234, 93, 132, 58, 172, 136, 150, 149];
 const RIGHT_EAR_OCCLUDER_POINTS = [454, 323, 361, 288, 397, 365, 379, 378];
+const ENABLE_EAR_OCCLUDERS = true;
+const USE_DEPTH_VISIBILITY = true;
+
+let leftHiddenScore = 0;
+let rightHiddenScore = 0;
+let leftVisibleState = true;
+let rightVisibleState = true;
 
 // Rotation de base (corrige orientation modele si necessaire)
 const BASE_ROT_LEFT = new THREE.Quaternion().setFromEuler(
@@ -56,8 +66,8 @@ const BASE_ROT_RIGHT = new THREE.Quaternion().setFromEuler(
 let LOBULE_OFFSET = { x: 0.022, y: -0.046 };
 
 export function setLobuleOffsets(x, y) {
-  LOBULE_OFFSET.x = x;
-  LOBULE_OFFSET.y = y;
+  LOBULE_OFFSET.x = THREE.MathUtils.clamp(Number(x) || 0, -0.08, 0.08);
+  LOBULE_OFFSET.y = THREE.MathUtils.clamp(Number(y) || 0, -0.12, 0.12);
 }
 
 export function setEarringScaleMultiplier(value) {
@@ -128,6 +138,12 @@ class Kalman1D {
 
     return this.x;
   }
+
+  reset() {
+    this.p = 1;
+    this.x = 0;
+    this.initialized = false;
+  }
 }
 
 class Kalman3D {
@@ -144,6 +160,12 @@ class Kalman3D {
       z: this.kz.filter(v.z || 0)
     };
   }
+
+  reset() {
+    this.kx.reset();
+    this.ky.reset();
+    this.kz.reset();
+  }
 }
 
 const kalmanLeft = new Kalman3D({
@@ -157,6 +179,19 @@ const kalmanRight = new Kalman3D({
   y: { q: 0.0024, r: 0.002 },
   z: { q: 0.0015, r: 0.01 }
 });
+
+function resetTrackingState() {
+  isFirstFrame = true;
+  prevQuatLeft.identity();
+  prevQuatRight.identity();
+  smoothedDist = 500;
+  leftHiddenScore = 0;
+  rightHiddenScore = 0;
+  leftVisibleState = true;
+  rightVisibleState = true;
+  kalmanLeft.reset();
+  kalmanRight.reset();
+}
 
 function getPnPCenterNormalized(data) {
   const tvec = data?.tvec;
@@ -178,6 +213,33 @@ function getPnPCenterNormalized(data) {
 function mapPoseDepthToSceneZ(tvecZ) {
   const distance = Math.abs(tvecZ || 500);
   return THREE.MathUtils.clamp((500 - distance) * DEPTH_Z_SCALE, -0.8, 0.8);
+}
+
+function getSceneAspect() {
+  const el = renderer?.domElement;
+  if (!el) return 1;
+  return (el.width || 1) / (el.height || 1);
+}
+
+function mapLandmarkToScene(landmark, mirrorPreview, cover, sceneAspect) {
+  if (!landmark) return { x: 0, y: 0 };
+
+  let nx = landmark.x;
+  let ny = landmark.y;
+
+  if (cover && Number.isFinite(cover.drawW) && Number.isFinite(cover.drawH) && Number.isFinite(cover.dstW) && Number.isFinite(cover.dstH)) {
+    const px = cover.dx + nx * cover.drawW;
+    const py = cover.dy + ny * cover.drawH;
+    nx = px / cover.dstW;
+    ny = py / cover.dstH;
+  }
+
+  if (mirrorPreview) nx = 1 - nx;
+
+  return {
+    x: (nx - 0.5) * 2 * sceneAspect,
+    y: -(ny - 0.5) * 2
+  };
 }
 
 function createEarOccluder(pointsCount) {
@@ -206,7 +268,7 @@ function createEarOccluder(pointsCount) {
   return mesh;
 }
 
-function updateEarOccluder(mesh, landmarkIds, landmarks, aspect, mirrorPreview, poseDepthZ) {
+function updateEarOccluder(mesh, landmarkIds, landmarks, mirrorPreview, poseDepthZ, cover, sceneAspect) {
   if (!mesh || !landmarks || landmarks.length < 468) return;
 
   const positions = mesh.geometry.attributes.position.array;
@@ -216,12 +278,11 @@ function updateEarOccluder(mesh, landmarkIds, landmarks, aspect, mirrorPreview, 
 
   for (let i = 0; i < landmarkIds.length; i++) {
     const lm = landmarks[landmarkIds[i]];
-    const x = mirrorPreview ? (1 - lm.x) : lm.x;
-    const y = lm.y;
+    const p = mapLandmarkToScene(lm, mirrorPreview, cover, sceneAspect);
     const z = poseDepthZ + THREE.MathUtils.clamp((lm.z || 0) * LANDMARK_Z_SCALE, -0.35, 0.35) + OCCLUDER_Z_BIAS;
 
-    positions[(i + 1) * 3 + 0] = (x - 0.5) * 2 * aspect;
-    positions[(i + 1) * 3 + 1] = -(y - 0.5) * 2;
+    positions[(i + 1) * 3 + 0] = p.x;
+    positions[(i + 1) * 3 + 1] = p.y;
     positions[(i + 1) * 3 + 2] = z;
 
     cx += positions[(i + 1) * 3 + 0];
@@ -238,9 +299,11 @@ function updateEarOccluder(mesh, landmarkIds, landmarks, aspect, mirrorPreview, 
   mesh.geometry.computeVertexNormals();
 }
 
-function updateEarOccluders(landmarks, aspect, mirrorPreview, poseDepthZ) {
-  updateEarOccluder(leftEarOccluder, LEFT_EAR_OCCLUDER_POINTS, landmarks, aspect, mirrorPreview, poseDepthZ);
-  updateEarOccluder(rightEarOccluder, RIGHT_EAR_OCCLUDER_POINTS, landmarks, aspect, mirrorPreview, poseDepthZ);
+function updateEarOccluders(landmarks, mirrorPreview, poseDepthZ) {
+  const sceneAspect = getSceneAspect();
+  const cover = window.__LAST_VIDEO_COVER__ || null;
+  updateEarOccluder(leftEarOccluder, LEFT_EAR_OCCLUDER_POINTS, landmarks, mirrorPreview, poseDepthZ, cover, sceneAspect);
+  updateEarOccluder(rightEarOccluder, RIGHT_EAR_OCCLUDER_POINTS, landmarks, mirrorPreview, poseDepthZ, cover, sceneAspect);
 }
 
 function estimateYawFromRot9(rot9) {
@@ -260,9 +323,14 @@ function getEarVisibilityFromDepth(landmarks, yaw) {
     return { left: true, right: true };
   }
 
+  if (!USE_DEPTH_VISIBILITY) {
+    return { left: true, right: true };
+  }
+
   const yawAbs = Math.abs(yaw || 0);
   if (yawAbs < EAR_OCCLUDE_MIN_YAW) {
-    return { left: true, right: true };
+    leftHiddenScore = THREE.MathUtils.lerp(leftHiddenScore, 0, EAR_HIDE_SMOOTH);
+    rightHiddenScore = THREE.MathUtils.lerp(rightHiddenScore, 0, EAR_HIDE_SMOOTH);
   }
 
   const left = landmarks[LOBULE_LANDMARKS.LEFT.LOBE_MAIN];
@@ -275,28 +343,27 @@ function getEarVisibilityFromDepth(landmarks, yaw) {
   const rightZ = right.z || 0;
   const dz = leftZ - rightZ;
 
-  if (Math.abs(dz) < EAR_OCCLUDE_Z_THRESHOLD) {
-    return { left: true, right: true };
+  let leftTarget = 0;
+  let rightTarget = 0;
+
+  // Use relative depth directly (farther ear gets hidden) to avoid mirrored/yaw-sign mismatches.
+  const yawFactor = THREE.MathUtils.clamp((yawAbs - EAR_OCCLUDE_MIN_YAW) / 0.45, 0, 1);
+  const depthThreshold = THREE.MathUtils.lerp(EAR_OCCLUDE_Z_THRESHOLD, EAR_OCCLUDE_Z_THRESHOLD * 0.55, yawFactor);
+  if (yawAbs >= EAR_OCCLUDE_MIN_YAW && Math.abs(dz) >= depthThreshold) {
+    if (dz > 0) leftTarget = 1;
+    else rightTarget = 1;
   }
 
-  if (yaw > 0) {
-    return {
-      left: leftZ + EAR_OCCLUDE_Z_THRESHOLD <= rightZ,
-      right: true
-    };
-  }
+  leftHiddenScore = THREE.MathUtils.lerp(leftHiddenScore, leftTarget, EAR_HIDE_SMOOTH);
+  rightHiddenScore = THREE.MathUtils.lerp(rightHiddenScore, rightTarget, EAR_HIDE_SMOOTH);
 
-  if (yaw < 0) {
-    return {
-      left: true,
-      right: rightZ + EAR_OCCLUDE_Z_THRESHOLD <= leftZ
-    };
-  }
+  if (leftVisibleState && leftHiddenScore > EAR_HIDE_HYST_ON) leftVisibleState = false;
+  else if (!leftVisibleState && leftHiddenScore < EAR_HIDE_HYST_OFF) leftVisibleState = true;
 
-  return {
-    left: true,
-    right: true
-  };
+  if (rightVisibleState && rightHiddenScore > EAR_HIDE_HYST_ON) rightVisibleState = false;
+  else if (!rightVisibleState && rightHiddenScore < EAR_HIDE_HYST_OFF) rightVisibleState = true;
+
+  return { left: leftVisibleState, right: rightVisibleState };
 }
 
 function computeTopAnchorPoint(root) {
@@ -340,6 +407,7 @@ function computeTopAnchorPoint(root) {
 export function initEarringTryOn(options) {
   config = options;
   const canvas = options.canvas;
+  resetTrackingState();
 
   scene = new THREE.Scene();
 
@@ -353,7 +421,7 @@ export function initEarringTryOn(options) {
     antialias: true,
     preserveDrawingBuffer: true
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(1);
   renderer.setSize(canvas.width, canvas.height, false);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -420,21 +488,17 @@ export function initEarringTryOn(options) {
     (err) => console.error('Failed to load 3D model:', err)
   );
 
-  leftEarOccluder = createEarOccluder(LEFT_EAR_OCCLUDER_POINTS.length);
-  rightEarOccluder = createEarOccluder(RIGHT_EAR_OCCLUDER_POINTS.length);
-  scene.add(leftEarOccluder);
-  scene.add(rightEarOccluder);
+  if (ENABLE_EAR_OCCLUDERS) {
+    leftEarOccluder = createEarOccluder(LEFT_EAR_OCCLUDER_POINTS.length);
+    rightEarOccluder = createEarOccluder(RIGHT_EAR_OCCLUDER_POINTS.length);
+    scene.add(leftEarOccluder);
+    scene.add(rightEarOccluder);
+  }
 
   window.addEventListener('resize', () => {
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
-    const dpr = Math.min(window.devicePixelRatio, 2);
+    renderer.setSize(canvas.width, canvas.height, false);
 
-    renderer.setSize(w * dpr, h * dpr, false);
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-
-    const nextAspect = w / h;
+    const nextAspect = (canvas.width || 1) / (canvas.height || 1);
     camera.left = -nextAspect;
     camera.right = nextAspect;
     camera.updateProjectionMatrix();
@@ -453,8 +517,8 @@ export function updateEarringTryOn(data) {
     return;
   }
 
-  const { landmarks, earLobes, rot9, w, h, mirrorPreview } = data;
-  const aspect = w / h;
+  const { landmarks, earLobes, rot9, mirrorPreview, cover } = data;
+  const sceneAspect = getSceneAspect();
 
   let leftPos;
   let rightPos;
@@ -494,29 +558,24 @@ export function updateEarringTryOn(data) {
   const smoothedLeft = kalmanLeft.filter(leftPos);
   const smoothedRight = kalmanRight.filter(rightPos);
 
-  const toThreeX = (nx, mirror) => {
-    const x = mirror ? (1 - nx) : nx;
-    return (x - 0.5) * 2 * aspect;
-  };
-
-  const toThreeY = (ny) => {
-    return -(ny - 0.5) * 2;
-  };
-
   const poseDepthZ = mapPoseDepthToSceneZ(data.tvec?.z);
-  updateEarOccluders(landmarks, aspect, mirrorPreview, poseDepthZ);
+  if (ENABLE_EAR_OCCLUDERS) {
+    updateEarOccluders(landmarks, mirrorPreview, poseDepthZ);
+  }
   const yaw = estimateYawFromRot9(rot9);
   const earVisibility = getEarVisibilityFromDepth(landmarks, yaw);
 
   const leftDepthZ = poseDepthZ + THREE.MathUtils.clamp((smoothedLeft.z || 0) * LANDMARK_Z_SCALE, -0.2, 0.2);
   const rightDepthZ = poseDepthZ + THREE.MathUtils.clamp((smoothedRight.z || 0) * LANDMARK_Z_SCALE, -0.2, 0.2);
 
-  const lx = toThreeX(smoothedLeft.x, mirrorPreview);
-  const ly = toThreeY(smoothedLeft.y);
+  const left2d = mapLandmarkToScene(smoothedLeft, mirrorPreview, cover, sceneAspect);
+  const lx = left2d.x;
+  const ly = left2d.y;
   earringLeft.position.set(lx, ly, leftDepthZ);
 
-  const rx = toThreeX(smoothedRight.x, mirrorPreview);
-  const ry = toThreeY(smoothedRight.y);
+  const right2d = mapLandmarkToScene(smoothedRight, mirrorPreview, cover, sceneAspect);
+  const rx = right2d.x;
+  const ry = right2d.y;
   earringRight.position.set(rx, ry, rightDepthZ);
 
   if (rot9 && rot9.length === 9) {

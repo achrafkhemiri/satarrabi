@@ -880,6 +880,7 @@
 
       faceMesh.onResults(results => {
         const cover = drawVideoCover(ctx, video);
+        window.__LAST_VIDEO_COVER__ = cover;
 
         if (!camMat) {
           const vW = video.videoWidth || 1280;
@@ -972,6 +973,7 @@
             rot9,
             w: imgW,
             h: imgH,
+            cover,
             mirrorPreview: chkMirror.checked,
             tvec: { x: tvec.data64F[0], y: tvec.data64F[1], z: tvec.data64F[2] },
             intrinsics: window.__INTRINSICS__,
@@ -1019,10 +1021,60 @@ Rotation:
         imagePoints.delete();
       });
 
+      function getCameraStream(constraints) {
+        if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+          return navigator.mediaDevices.getUserMedia(constraints);
+        }
+
+        const legacyGetUserMedia =
+          navigator.getUserMedia ||
+          navigator.webkitGetUserMedia ||
+          navigator.mozGetUserMedia;
+
+        if (!legacyGetUserMedia) {
+          return Promise.reject(new Error('getUserMedia indisponible dans ce contexte'));
+        }
+
+        return new Promise((resolve, reject) => {
+          legacyGetUserMedia.call(navigator, constraints, resolve, reject);
+        });
+      }
+
+      function buildCameraErrorMessage(err) {
+        const reason = err?.message || String(err);
+        const secure = window.isSecureContext;
+        const host = window.location.hostname;
+
+        if (!secure) {
+          return [
+            'Camera error: contexte non securise',
+            '',
+            `URL actuelle: ${window.location.href}`,
+            'Sur mobile, la camera exige HTTPS (ou localhost).',
+            'Ouvre l\'app via un lien HTTPS (ngrok/cloudflared).',
+            '',
+            `Detail: ${reason}`
+          ].join('\n');
+        }
+
+        if (!navigator.mediaDevices) {
+          return [
+            'Camera error: mediaDevices non disponible',
+            '',
+            `Host: ${host}`,
+            'Essaie HTTPS et un navigateur mobile recent (Chrome/Safari).',
+            '',
+            `Detail: ${reason}`
+          ].join('\n');
+        }
+
+        return `Camera error: ${reason}`;
+      }
+
       // Start camera
       (async () => {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({
+          const stream = await getCameraStream({
             audio: false,
             video: {
               facingMode: 'user',
@@ -1045,7 +1097,7 @@ Rotation:
           pump();
 
         } catch (err) {
-          info.textContent = 'Camera error: ' + err.message;
+          info.textContent = buildCameraErrorMessage(err);
         }
       })();
 
