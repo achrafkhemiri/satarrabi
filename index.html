@@ -253,23 +253,32 @@
 
         <h2 class="panel-title" style="margin-top: 14px;">Translation 3D</h2>
         <div id="translation-controls" style="padding: 12px; border: 1px solid rgba(149, 205, 255, 0.35); border-radius: 12px; background: rgba(0,0,0,0.24); margin-top: 8px;">
-          <div style="margin-bottom: 10px;">
-            <label style="display: block; font-size: 0.85rem; color: var(--text-soft); margin-bottom: 4px;">
-              Translation X: <span id="translationXValue">0.000</span>
-            </label>
-            <input type="range" id="translationX" min="-0.25" max="0.25" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
+          <div style="font-size: 0.8rem; letter-spacing: 0.06em; color: #8bd4ff; margin-bottom: 8px; text-transform: uppercase;">Oreille gauche</div>
+          <div style="margin-bottom: 8px;">
+            <label style="display: block; font-size: 0.82rem; color: var(--text-soft); margin-bottom: 3px;">X: <span id="translationLeftXValue">0.000</span></label>
+            <input type="range" id="translationLeftX" min="-0.25" max="0.25" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
+          </div>
+          <div style="margin-bottom: 8px;">
+            <label style="display: block; font-size: 0.82rem; color: var(--text-soft); margin-bottom: 3px;">Y: <span id="translationLeftYValue">0.000</span></label>
+            <input type="range" id="translationLeftY" min="-0.25" max="0.25" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
           </div>
           <div style="margin-bottom: 10px;">
-            <label style="display: block; font-size: 0.85rem; color: var(--text-soft); margin-bottom: 4px;">
-              Translation Y: <span id="translationYValue">0.000</span>
-            </label>
-            <input type="range" id="translationY" min="-0.25" max="0.25" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
+            <label style="display: block; font-size: 0.82rem; color: var(--text-soft); margin-bottom: 3px;">Z: <span id="translationLeftZValue">0.000</span></label>
+            <input type="range" id="translationLeftZ" min="-0.35" max="0.35" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
+          </div>
+
+          <div style="font-size: 0.8rem; letter-spacing: 0.06em; color: #8bd4ff; margin: 2px 0 8px; text-transform: uppercase;">Oreille droite</div>
+          <div style="margin-bottom: 8px;">
+            <label style="display: block; font-size: 0.82rem; color: var(--text-soft); margin-bottom: 3px;">X: <span id="translationRightXValue">0.000</span></label>
+            <input type="range" id="translationRightX" min="-0.25" max="0.25" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
+          </div>
+          <div style="margin-bottom: 8px;">
+            <label style="display: block; font-size: 0.82rem; color: var(--text-soft); margin-bottom: 3px;">Y: <span id="translationRightYValue">0.000</span></label>
+            <input type="range" id="translationRightY" min="-0.25" max="0.25" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
           </div>
           <div style="margin-bottom: 10px;">
-            <label style="display: block; font-size: 0.85rem; color: var(--text-soft); margin-bottom: 4px;">
-              Translation Z: <span id="translationZValue">0.000</span>
-            </label>
-            <input type="range" id="translationZ" min="-0.35" max="0.35" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
+            <label style="display: block; font-size: 0.82rem; color: var(--text-soft); margin-bottom: 3px;">Z: <span id="translationRightZValue">0.000</span></label>
+            <input type="range" id="translationRightZ" min="-0.35" max="0.35" step="0.005" value="0" style="width: 100%; accent-color: #8bd4ff;">
           </div>
           <div style="display: flex; gap: 8px;">
             <button id="resetTranslation" style="flex: 1; padding: 8px; border: 1px solid var(--stroke); border-radius: 8px; background: rgba(255,255,255,0.08); color: var(--text); cursor: pointer; font-size: 0.85rem;">Reset</button>
@@ -277,7 +286,7 @@
           </div>
           <div style="margin-top: 8px; font-size: 0.78rem; color: var(--text-soft);">
             <strong>Valeurs actuelles:</strong><br>
-            <code id="currentTranslation" style="color: #8bd4ff;">X: 0.000, Y: 0.000, Z: 0.000</code>
+            <code id="currentTranslation" style="color: #8bd4ff;">L(X: 0.000, Y: 0.000, Z: 0.000) | R(X: 0.000, Y: 0.000, Z: 0.000)</code>
           </div>
         </div>
       </aside>
@@ -538,12 +547,18 @@
     const currentOffsets = document.getElementById('currentOffsets');
     const resetOffsets = document.getElementById('resetOffsets');
     const copyOffsets = document.getElementById('copyOffsets');
-    const translationX = document.getElementById('translationX');
-    const translationY = document.getElementById('translationY');
-    const translationZ = document.getElementById('translationZ');
-    const translationXValue = document.getElementById('translationXValue');
-    const translationYValue = document.getElementById('translationYValue');
-    const translationZValue = document.getElementById('translationZValue');
+    const translationLeftX = document.getElementById('translationLeftX');
+    const translationLeftY = document.getElementById('translationLeftY');
+    const translationLeftZ = document.getElementById('translationLeftZ');
+    const translationRightX = document.getElementById('translationRightX');
+    const translationRightY = document.getElementById('translationRightY');
+    const translationRightZ = document.getElementById('translationRightZ');
+    const translationLeftXValue = document.getElementById('translationLeftXValue');
+    const translationLeftYValue = document.getElementById('translationLeftYValue');
+    const translationLeftZValue = document.getElementById('translationLeftZValue');
+    const translationRightXValue = document.getElementById('translationRightXValue');
+    const translationRightYValue = document.getElementById('translationRightYValue');
+    const translationRightZValue = document.getElementById('translationRightZValue');
     const currentTranslation = document.getElementById('currentTranslation');
     const resetTranslation = document.getElementById('resetTranslation');
     const copyTranslation = document.getElementById('copyTranslation');
@@ -584,34 +599,50 @@
     });
 
     function updateTranslationDisplay() {
-      const x = parseFloat(translationX.value);
-      const y = parseFloat(translationY.value);
-      const z = parseFloat(translationZ.value);
-      translationXValue.textContent = x.toFixed(3);
-      translationYValue.textContent = y.toFixed(3);
-      translationZValue.textContent = z.toFixed(3);
-      currentTranslation.textContent = `X: ${x.toFixed(3)}, Y: ${y.toFixed(3)}, Z: ${z.toFixed(3)}`;
+      const lx = parseFloat(translationLeftX.value);
+      const ly = parseFloat(translationLeftY.value);
+      const lz = parseFloat(translationLeftZ.value);
+      const rx = parseFloat(translationRightX.value);
+      const ry = parseFloat(translationRightY.value);
+      const rz = parseFloat(translationRightZ.value);
+
+      translationLeftXValue.textContent = lx.toFixed(3);
+      translationLeftYValue.textContent = ly.toFixed(3);
+      translationLeftZValue.textContent = lz.toFixed(3);
+      translationRightXValue.textContent = rx.toFixed(3);
+      translationRightYValue.textContent = ry.toFixed(3);
+      translationRightZValue.textContent = rz.toFixed(3);
+      currentTranslation.textContent = `L(X: ${lx.toFixed(3)}, Y: ${ly.toFixed(3)}, Z: ${lz.toFixed(3)}) | R(X: ${rx.toFixed(3)}, Y: ${ry.toFixed(3)}, Z: ${rz.toFixed(3)})`;
       if (typeof setEarringTranslation === 'function') {
-        setEarringTranslation(x, y, z);
+        setEarringTranslation(lx, ly, lz, rx, ry, rz);
       }
     }
 
-    translationX.addEventListener('input', updateTranslationDisplay);
-    translationY.addEventListener('input', updateTranslationDisplay);
-    translationZ.addEventListener('input', updateTranslationDisplay);
+    translationLeftX.addEventListener('input', updateTranslationDisplay);
+    translationLeftY.addEventListener('input', updateTranslationDisplay);
+    translationLeftZ.addEventListener('input', updateTranslationDisplay);
+    translationRightX.addEventListener('input', updateTranslationDisplay);
+    translationRightY.addEventListener('input', updateTranslationDisplay);
+    translationRightZ.addEventListener('input', updateTranslationDisplay);
 
     resetTranslation.addEventListener('click', () => {
-      translationX.value = 0;
-      translationY.value = 0;
-      translationZ.value = 0;
+      translationLeftX.value = 0;
+      translationLeftY.value = 0;
+      translationLeftZ.value = 0;
+      translationRightX.value = 0;
+      translationRightY.value = 0;
+      translationRightZ.value = 0;
       updateTranslationDisplay();
     });
 
     copyTranslation.addEventListener('click', () => {
-      const x = parseFloat(translationX.value);
-      const y = parseFloat(translationY.value);
-      const z = parseFloat(translationZ.value);
-      const text = `EARRING_TRANSLATION = { x: ${x.toFixed(3)}, y: ${y.toFixed(3)}, z: ${z.toFixed(3)} }`;
+      const lx = parseFloat(translationLeftX.value);
+      const ly = parseFloat(translationLeftY.value);
+      const lz = parseFloat(translationLeftZ.value);
+      const rx = parseFloat(translationRightX.value);
+      const ry = parseFloat(translationRightY.value);
+      const rz = parseFloat(translationRightZ.value);
+      const text = `EARRING_TRANSLATION = { left: { x: ${lx.toFixed(3)}, y: ${ly.toFixed(3)}, z: ${lz.toFixed(3)} }, right: { x: ${rx.toFixed(3)}, y: ${ry.toFixed(3)}, z: ${rz.toFixed(3)} } }`;
       navigator.clipboard.writeText(text).then(() => {
         copyTranslation.textContent = 'Copied!';
         setTimeout(() => { copyTranslation.textContent = 'Copy Values'; }, 1500);

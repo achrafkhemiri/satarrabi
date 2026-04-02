@@ -18,7 +18,10 @@ let rightEarOccluder = null;
 let config = null;
 let baseEarringScale = 1;
 let userScaleMultiplier = 1;
-let userTranslation = { x: 0, y: 0, z: 0 };
+let userTranslation = {
+  left: { x: 0, y: 0, z: 0 },
+  right: { x: 0, y: 0, z: 0 }
+};
 let smoothedDist = 500;
 
 // ===============================
@@ -42,6 +45,13 @@ const EAR_HIDE_HYST_ON = 0.62;
 const EAR_HIDE_HYST_OFF = 0.34;
 const EAR_HIDE_SMOOTH = 0.28;
 const TRANSLATION_Z_SCALE_GAIN = 1.25;
+const TRANSLATION_YAW_START = 0.18;
+const TRANSLATION_YAW_FULL = 0.45;
+const TRANSLATION_PITCH_START = 0.06;
+const TRANSLATION_PITCH_FULL = 0.24;
+const PITCH_DROP_START = 0.1;
+const PITCH_DROP_FULL = 0.55;
+const PITCH_DROP_MAX_Y = 0.018;
 
 const LEFT_EAR_OCCLUDER_POINTS = [234, 93, 132, 58, 172, 136, 150, 149];
 const RIGHT_EAR_OCCLUDER_POINTS = [454, 323, 361, 288, 397, 365, 379, 378];
@@ -78,10 +88,14 @@ export function setEarringScaleMultiplier(value) {
   userScaleMultiplier = THREE.MathUtils.clamp(n, 0.02, 2.0);
 }
 
-export function setEarringTranslation(x, y, z = 0) {
-  userTranslation.x = THREE.MathUtils.clamp(Number(x) || 0, -0.5, 0.5);
-  userTranslation.y = THREE.MathUtils.clamp(Number(y) || 0, -0.5, 0.5);
-  userTranslation.z = THREE.MathUtils.clamp(Number(z) || 0, -0.8, 0.8);
+export function setEarringTranslation(leftX, leftY, leftZ = 0, rightX = leftX, rightY = leftY, rightZ = leftZ) {
+  userTranslation.left.x = THREE.MathUtils.clamp(Number(leftX) || 0, -0.5, 0.5);
+  userTranslation.left.y = THREE.MathUtils.clamp(Number(leftY) || 0, -0.5, 0.5);
+  userTranslation.left.z = THREE.MathUtils.clamp(Number(leftZ) || 0, -0.8, 0.8);
+
+  userTranslation.right.x = THREE.MathUtils.clamp(Number(rightX) || 0, -0.5, 0.5);
+  userTranslation.right.y = THREE.MathUtils.clamp(Number(rightY) || 0, -0.5, 0.5);
+  userTranslation.right.z = THREE.MathUtils.clamp(Number(rightZ) || 0, -0.8, 0.8);
 }
 
 const LOBULE_LANDMARKS = {
@@ -140,7 +154,11 @@ class Kalman1D {
 
     this.p += this.q;
 
-    const k = this.p / (this.p + this.r);
+    let k = this.p / (this.p + this.r);
+    // Boost responsiveness on rapid movement to reduce visible lag.
+    const innovation = Math.abs(measurement - this.x);
+    const fastMotionBoost = THREE.MathUtils.clamp(innovation / 0.03, 0, 1) * 0.35;
+    k = THREE.MathUtils.clamp(k + fastMotionBoost, 0, 0.95);
     this.x += k * (measurement - this.x);
     this.p *= (1 - k);
 
@@ -324,6 +342,18 @@ function estimateYawFromRot9(rot9) {
   );
   const e = new THREE.Euler().setFromRotationMatrix(rotMat, 'YXZ');
   return e.y;
+}
+
+function estimatePitchFromRot9(rot9) {
+  if (!rot9 || rot9.length !== 9) return 0;
+  const rotMat = new THREE.Matrix4().set(
+    rot9[0], rot9[1], rot9[2], 0,
+    rot9[3], rot9[4], rot9[5], 0,
+    rot9[6], rot9[7], rot9[8], 0,
+    0, 0, 0, 1
+  );
+  const e = new THREE.Euler().setFromRotationMatrix(rotMat, 'YXZ');
+  return e.x;
 }
 
 function getEarVisibilityFromDepth(landmarks, yaw) {
@@ -527,6 +557,10 @@ export function updateEarringTryOn(data) {
 
   const { landmarks, earLobes, rot9, mirrorPreview, cover } = data;
   const sceneAspect = getSceneAspect();
+  const pitch = estimatePitchFromRot9(rot9);
+  const pitchAbs = Math.abs(pitch);
+  const pitchBlend = THREE.MathUtils.smoothstep(pitchAbs, PITCH_DROP_START, PITCH_DROP_FULL);
+  const pitchDropY = pitchBlend * PITCH_DROP_MAX_Y;
 
   let leftPos;
   let rightPos;
@@ -563,6 +597,10 @@ export function updateEarringTryOn(data) {
     rightPos.y += dy * PNP_CENTER_BLEND_Y;
   }
 
+  // Keep earring anchors perceptually attached when user raises/lowers chin.
+  leftPos.y += pitchDropY;
+  rightPos.y += pitchDropY;
+
   const smoothedLeft = kalmanLeft.filter(leftPos);
   const smoothedRight = kalmanRight.filter(rightPos);
 
@@ -571,6 +609,29 @@ export function updateEarringTryOn(data) {
     updateEarOccluders(landmarks, mirrorPreview, poseDepthZ);
   }
   const yaw = estimateYawFromRot9(rot9);
+  const yawAbs = Math.abs(yaw);
+  const translationYawBlend = THREE.MathUtils.clamp(
+    (yawAbs - TRANSLATION_YAW_START) / (TRANSLATION_YAW_FULL - TRANSLATION_YAW_START),
+    0,
+    1
+  );
+  const translationPitchBlend = THREE.MathUtils.clamp(
+    (pitchAbs - TRANSLATION_PITCH_START) / (TRANSLATION_PITCH_FULL - TRANSLATION_PITCH_START),
+    0,
+    1
+  );
+  const translationYBlend = translationPitchBlend;
+  const translationBlend = Math.max(translationYawBlend, translationPitchBlend);
+  const translationLeft = {
+    x: userTranslation.left.x * translationBlend,
+    y: userTranslation.left.y * translationYBlend,
+    z: userTranslation.left.z * translationBlend
+  };
+  const translationRight = {
+    x: userTranslation.right.x * translationBlend,
+    y: userTranslation.right.y * translationYBlend,
+    z: userTranslation.right.z * translationBlend
+  };
   const earVisibility = getEarVisibilityFromDepth(landmarks, yaw);
 
   const leftDepthZ = poseDepthZ + THREE.MathUtils.clamp((smoothedLeft.z || 0) * LANDMARK_Z_SCALE, -0.2, 0.2);
@@ -580,18 +641,18 @@ export function updateEarringTryOn(data) {
   const lx = left2d.x;
   const ly = left2d.y;
   earringLeft.position.set(
-    lx + userTranslation.x,
-    ly + userTranslation.y,
-    leftDepthZ + userTranslation.z
+    lx + translationLeft.x,
+    ly + translationLeft.y,
+    leftDepthZ + translationLeft.z
   );
 
   const right2d = mapLandmarkToScene(smoothedRight, mirrorPreview, cover, sceneAspect);
   const rx = right2d.x;
   const ry = right2d.y;
   earringRight.position.set(
-    rx + userTranslation.x,
-    ry + userTranslation.y,
-    rightDepthZ + userTranslation.z
+    rx + translationRight.x,
+    ry + translationRight.y,
+    rightDepthZ + translationRight.z
   );
 
   if (rot9 && rot9.length === 9) {
@@ -631,11 +692,11 @@ export function updateEarringTryOn(data) {
   const baseScale = baseEarringScale || Math.abs(earringLeft.scale.x) || 0.01;
   // In orthographic projection, Z translation alone is barely visible.
   // Couple Z with scale to create a perceptible depth effect.
-  const zScaleFactor = THREE.MathUtils.clamp(1 + (userTranslation.z * TRANSLATION_Z_SCALE_GAIN), 0.45, 2.2);
-  const currentScale = baseScale * scaleFactor * userScaleMultiplier * zScaleFactor;
+  const leftZScaleFactor = THREE.MathUtils.clamp(1 + (translationLeft.z * TRANSLATION_Z_SCALE_GAIN), 0.45, 2.2);
+  const rightZScaleFactor = THREE.MathUtils.clamp(1 + (translationRight.z * TRANSLATION_Z_SCALE_GAIN), 0.45, 2.2);
 
-  earringLeft.scale.setScalar(currentScale);
-  earringRight.scale.setScalar(currentScale);
+  earringLeft.scale.setScalar(baseScale * scaleFactor * userScaleMultiplier * leftZScaleFactor);
+  earringRight.scale.setScalar(baseScale * scaleFactor * userScaleMultiplier * rightZScaleFactor);
 
   earringLeft.visible = earVisibility.left;
   earringRight.visible = earVisibility.right;
